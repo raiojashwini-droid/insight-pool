@@ -3,6 +3,16 @@ const { getIO, updateSessionStatus } = require('../../socket/server');
 
 const attendanceService = {
     clockIn: async (employeeId, organizationId) => {
+        // Check if employee is deactivated
+        const employee = await prisma.employee.findUnique({ where: { id: employeeId }, select: { status: true } });
+        if (!employee) throw new Error('Employee not found');
+        if (employee.status === 'DEACTIVATED') {
+            const err = new Error('Cannot clock in: Employee account is deactivated');
+            err.code = 'ACCOUNT_DEACTIVATED';
+            err.statusCode = 403;
+            throw err;
+        }
+
         const now = new Date();
         // Set today to noon to prevent timezone shifts from changing the calendar date in MySQL
         const today = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 12, 0, 0);
@@ -20,22 +30,51 @@ const attendanceService = {
             throw new Error('Already clocked in (active session exists)');
         }
 
-        // Get employee's shift for today to detect lateness
+        // Guard: Prevent clocking in if this period's timesheet is already approved and locked
+        try {
+            const timesheetsService = require('../timesheets/timesheets.service');
+            const isLocked = await timesheetsService.isPeriodLocked(organizationId, employeeId, today);
+            if (isLocked) {
+                const err = new Error('Cannot clock in: The timesheet for this period has already been approved and locked');
+                err.statusCode = 409;
+                throw err;
+            }
+        } catch (lErr) {
+            if (lErr.statusCode === 409) throw lErr;
+        }
+
+        // Get employee's shift for today or overnight shift starting yesterday
+        const yesterday = new Date(today);
+        yesterday.setDate(yesterday.getDate() - 1);
+
         const shift = await prisma.shift.findFirst({
             where: {
                 employeeId,
-                date: today,
-            }
+                OR: [
+                    { date: today },
+                    { date: yesterday }
+                ]
+            },
+            orderBy: { date: 'desc' }
         });
 
         let late = false;
         if (shift) {
             const [sHour, sMin] = shift.startTime.split(':').map(Number);
-            const shiftStartTime = new Date(now);
+            const [eHour, eMin] = shift.endTime.split(':').map(Number);
+            const isOvernight = sHour > eHour || (sHour === eHour && sMin > eMin);
+
+            const shiftStartTime = new Date(shift.date);
             shiftStartTime.setHours(sHour, sMin, 0, 0);
 
-            if (now > shiftStartTime) {
-                late = true;
+            if (isOvernight && shift.date.toISOString().slice(0, 10) === yesterday.toISOString().slice(0, 10)) {
+                if (now > shiftStartTime) {
+                    late = true;
+                }
+            } else if (!isOvernight && shift.date.toISOString().slice(0, 10) === today.toISOString().slice(0, 10)) {
+                if (now > shiftStartTime) {
+                    late = true;
+                }
             }
         }
 
@@ -51,7 +90,6 @@ const attendanceService = {
         });
 
         // Update employee status to ACTIVE (Guard: Ensure not deactivated)
-        const employee = await prisma.employee.findUnique({ where: { id: employeeId }, select: { status: true } });
         if (employee && employee.status !== 'DEACTIVATED') {
             await prisma.employee.update({
                 where: { id: employeeId },
@@ -99,23 +137,61 @@ const attendanceService = {
             throw new Error('No active clock-in session found');
         }
 
-        const duration = Math.floor((now - attendance.clockIn) / 1000); // in seconds
+        // If employee is on break, close open break log
+        const employeeInfo = await prisma.employee.findUnique({ where: { id: employeeId }, select: { status: true, organizationId: true } });
+        if (employeeInfo?.status === 'BREAK') {
+            const lastBreak = await prisma.activityLog.findFirst({
+                where: {
+                    employeeId,
+                    activityType: 'BREAK',
+                    duration: 0
+                },
+                orderBy: { timestamp: 'desc' }
+            });
+
+            if (lastBreak) {
+                const bDuration = Math.floor((now - lastBreak.timestamp) / 1000);
+                await prisma.activityLog.update({
+                    where: { id: lastBreak.id },
+                    data: { duration: bDuration }
+                });
+            }
+        }
+
+        // Calculate unpaid breaks during this attendance session
+        const breakLogs = await prisma.activityLog.findMany({
+            where: {
+                employeeId,
+                activityType: 'BREAK',
+                timestamp: { gte: attendance.clockIn, lte: now }
+            }
+        });
+        const breakSeconds = breakLogs.reduce((acc, b) => acc + (b.duration || 0), 0);
+        const grossDuration = Math.floor((now - attendance.clockIn) / 1000); // in seconds
+        const netDuration = Math.max(0, grossDuration - breakSeconds);
 
         const updatedAttendance = await prisma.attendance.update({
             where: { id: attendance.id },
             data: {
                 clockOut: now,
-                duration,
+                duration: netDuration,
             }
         });
 
         // Update employee status to OFFLINE (Guard: Ensure not deactivated)
-        const employeeInfo = await prisma.employee.findUnique({ where: { id: employeeId }, select: { status: true } });
         if (employeeInfo && employeeInfo.status !== 'DEACTIVATED') {
             await prisma.employee.update({
                 where: { id: employeeId },
                 data: { status: 'OFFLINE' }
             });
+        }
+
+        // Auto-stop any running task timer
+        try {
+            const tasksService = require('../tasks/tasks.service');
+            await tasksService.stopActiveTimerForEmployee(employeeId, now);
+        } catch (e) {
+            console.error('[AttendanceService] Auto-stopping task timer on clock-out failed:', e.message);
         }
 
         // Emit real-time events
@@ -248,6 +324,29 @@ const attendanceService = {
     addManualTime: async (data) => {
         const { employeeId, organizationId, startDate, startTime, endDate, endTime, timezone, type, description } = data;
 
+        // Guard: Reject deactivated employee
+        const emp = await prisma.employee.findUnique({ where: { id: employeeId }, select: { status: true } });
+        if (!emp) throw new Error('Employee not found');
+        if (emp.status === 'DEACTIVATED') {
+            const err = new Error('Cannot add manual time: Employee account is deactivated');
+            err.code = 'ACCOUNT_DEACTIVATED';
+            err.statusCode = 403;
+            throw err;
+        }
+
+        // Guard: Prevent adding manual time if timesheet for this period is already approved and locked
+        try {
+            const timesheetsService = require('../timesheets/timesheets.service');
+            const isLocked = await timesheetsService.isPeriodLocked(organizationId, employeeId, startDate);
+            if (isLocked) {
+                const err = new Error('Cannot add manual time: The timesheet for this period has already been approved and locked');
+                err.statusCode = 409;
+                throw err;
+            }
+        } catch (lErr) {
+            if (lErr.statusCode === 409) throw lErr;
+        }
+
         const start = new Date(`${startDate} ${startTime}`);
         const end = new Date(`${endDate} ${endTime}`);
         const duration = Math.floor((end - start) / 1000);
@@ -319,6 +418,16 @@ const attendanceService = {
     },
 
     createShift: async (data) => {
+        // Guard: Reject deactivated employee
+        const emp = await prisma.employee.findUnique({ where: { id: data.employeeId }, select: { status: true } });
+        if (!emp) throw new Error('Employee not found');
+        if (emp.status === 'DEACTIVATED') {
+            const err = new Error('Cannot schedule shifts for a deactivated employee');
+            err.code = 'ACCOUNT_DEACTIVATED';
+            err.statusCode = 403;
+            throw err;
+        }
+
         const shift = await prisma.shift.create({
             data: {
                 employeeId: data.employeeId,
@@ -340,6 +449,16 @@ const attendanceService = {
     },
 
     createTimeOff: async (data) => {
+        // Guard: Reject deactivated employee
+        const emp = await prisma.employee.findUnique({ where: { id: data.employeeId }, select: { status: true } });
+        if (!emp) throw new Error('Employee not found');
+        if (emp.status === 'DEACTIVATED') {
+            const err = new Error('Cannot request or schedule time off for a deactivated employee');
+            err.code = 'ACCOUNT_DEACTIVATED';
+            err.statusCode = 403;
+            throw err;
+        }
+
         const timeOff = await prisma.timeOff.create({
             data: {
                 employeeId: data.employeeId,
@@ -416,6 +535,14 @@ const attendanceService = {
                     appWebsite: 'Break'
                 }
             });
+
+            // Auto-stop any running task timer
+            try {
+                const tasksService = require('../tasks/tasks.service');
+                await tasksService.stopActiveTimerForEmployee(employeeId, new Date());
+            } catch (e) {
+                console.error('[AttendanceService] Auto-stopping task timer on break failed:', e.message);
+            }
 
             // Notify real-time
             updateSessionStatus(employeeId, 'BREAK');

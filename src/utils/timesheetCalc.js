@@ -1,6 +1,7 @@
 /**
  * Timesheet Calculation Utility
- * Adapts Punchcard timeclock logic to existing Prisma/MySQL Attendance and ManualTime records.
+ * Advanced interval arithmetic: non-overlapping session merging, cross-midnight splitting,
+ * unpaid break deductions, and configurable weekly overtime thresholds.
  */
 
 function isoDay(d) {
@@ -16,9 +17,8 @@ function addDays(dateStr, n) {
 }
 
 function mondayOf(d = new Date()) {
-    const date = typeof d === 'string' ? new Date(d + 'T00:00:00Z') : new Date(d);
+    const date = typeof d === 'string' ? new Date(d.includes('T') ? d : d + 'T00:00:00Z') : new Date(d);
     const day = date.getUTCDay();
-    // In JS getUTCDay(): 0 is Sunday, 1 is Monday ... 6 is Saturday
     const diff = (day + 6) % 7; // diff to Monday
     date.setUTCDate(date.getUTCDate() - diff);
     return date.toISOString().slice(0, 10);
@@ -29,64 +29,187 @@ function weekDates(weekStart) {
 }
 
 /**
- * Calculates per-day minutes and detailed breakdown for 7 days (Mon-Sun).
+ * Merges overlapping and adjacent intervals: [[s1, e1], [s2, e2], ...]
  */
-function buildDailyBreakdown(attendanceRecords, manualRecords, weekStart, nowMs = Date.now()) {
-    const dates = weekDates(weekStart);
-    const byDay = Object.fromEntries(dates.map(d => [d, { minutes: 0, sessions: [] }]));
+function mergeIntervals(intervals) {
+    if (!intervals || intervals.length === 0) return [];
+    const valid = intervals.filter(([s, e]) => typeof s === 'number' && typeof e === 'number' && e > s);
+    if (valid.length === 0) return [];
+    
+    valid.sort((a, b) => a[0] - b[0]);
+    const merged = [valid[0]];
 
-    // 1. Process Attendance records
-    attendanceRecords.forEach(att => {
-        const d = isoDay(att.date || att.clockIn);
-        if (!byDay[d]) return;
+    for (let i = 1; i < valid.length; i++) {
+        const [currStart, currEnd] = valid[i];
+        const last = merged[merged.length - 1];
 
-        let seconds = 0;
-        let isLive = false;
-
-        if (att.duration && att.duration > 0) {
-            seconds = att.duration;
-        } else if (att.clockIn && att.clockOut) {
-            seconds = Math.max(0, Math.floor((new Date(att.clockOut).getTime() - new Date(att.clockIn).getTime()) / 1000));
-        } else if (att.clockIn && !att.clockOut) {
-            seconds = Math.max(0, Math.floor((nowMs - new Date(att.clockIn).getTime()) / 1000));
-            isLive = true;
+        if (currStart <= last[1]) {
+            last[1] = Math.max(last[1], currEnd);
+        } else {
+            merged.push([currStart, currEnd]);
         }
+    }
+    return merged;
+}
 
-        const mins = Math.round(seconds / 60);
-        byDay[d].minutes += mins;
-        byDay[d].sessions.push({
-            id: att.id,
-            type: 'attendance',
-            clockIn: att.clockIn,
-            clockOut: att.clockOut,
-            minutes: mins,
-            isLive
+/**
+ * Subtracts break intervals from work intervals
+ */
+function subtractIntervals(workIntervals, breakIntervals) {
+    let remaining = [...workIntervals];
+    for (const [bStart, bEnd] of breakIntervals) {
+        const next = [];
+        for (const [wStart, wEnd] of remaining) {
+            if (bEnd <= wStart || bStart >= wEnd) {
+                // No overlap
+                next.push([wStart, wEnd]);
+            } else {
+                // Overlap: split around break
+                if (wStart < bStart) {
+                    next.push([wStart, bStart]);
+                }
+                if (wEnd > bEnd) {
+                    next.push([bEnd, wEnd]);
+                }
+            }
+        }
+        remaining = next;
+    }
+    return remaining;
+}
+
+/**
+ * Calculates per-day minutes and detailed breakdown for 7 days (Mon-Sun).
+ * Supports:
+ * - Unpaid break deductions
+ * - Cross-midnight attendance & overnight shifts
+ * - Deduplication of overlapping attendance & manual time
+ */
+function buildDailyBreakdown(attendanceRecords = [], manualRecords = [], breakRecordsOrWeekStart = [], weekStartArg = '', nowMs = Date.now()) {
+    let breakRecords = [];
+    let weekStart = '';
+
+    if (typeof breakRecordsOrWeekStart === 'string') {
+        weekStart = breakRecordsOrWeekStart;
+        nowMs = typeof weekStartArg === 'number' ? weekStartArg : Date.now();
+    } else {
+        breakRecords = Array.isArray(breakRecordsOrWeekStart) ? breakRecordsOrWeekStart : [];
+        weekStart = weekStartArg;
+    }
+
+    const dates = weekDates(weekStart);
+    const byDay = Object.fromEntries(dates.map(d => [d, {
+        rawWorkIntervals: [],
+        rawBreakIntervals: [],
+        sessions: []
+    }]));
+
+    // 1. Process Attendance records (supports cross-midnight)
+    attendanceRecords.forEach(att => {
+        const sMs = new Date(att.clockIn).getTime();
+        const isLive = !att.clockOut;
+        const eMs = att.clockOut ? new Date(att.clockOut).getTime() : nowMs;
+        if (isNaN(sMs) || isNaN(eMs) || eMs <= sMs) return;
+
+        // Clip across week calendar days
+        dates.forEach(d => {
+            const dayStart = new Date(d + 'T00:00:00Z').getTime();
+            const dayEnd = new Date(d + 'T23:59:59.999Z').getTime() + 1; // 24:00:00.000
+
+            const ws = Math.max(sMs, dayStart);
+            const we = Math.min(eMs, dayEnd);
+
+            if (we > ws) {
+                byDay[d].rawWorkIntervals.push([ws, we]);
+                const crossMidnight = (sMs < dayStart) || (eMs > dayEnd);
+                byDay[d].sessions.push({
+                    id: att.id,
+                    type: 'attendance',
+                    clockIn: att.clockIn,
+                    clockOut: att.clockOut,
+                    minutes: Math.round((we - ws) / 60000),
+                    isLive,
+                    crossMidnight
+                });
+            }
         });
     });
 
-    // 2. Process Manual Time records
+    // 2. Process Manual Time records (work vs break)
     manualRecords.forEach(man => {
-        const d = isoDay(man.startTime);
-        if (!byDay[d]) return;
+        const sMs = new Date(man.startTime).getTime();
+        const eMs = new Date(man.endTime).getTime();
+        if (isNaN(sMs) || isNaN(eMs) || eMs <= sMs) return;
 
-        const seconds = man.duration || Math.max(0, Math.floor((new Date(man.endTime).getTime() - new Date(man.startTime).getTime()) / 1000));
-        const mins = Math.round(seconds / 60);
-        byDay[d].minutes += mins;
-        byDay[d].sessions.push({
-            id: man.id,
-            type: 'manual',
-            note: man.note || man.type,
-            startTime: man.startTime,
-            endTime: man.endTime,
-            minutes: mins
+        const isBreak = String(man.type || '').trim().toUpperCase() === 'BREAK';
+
+        dates.forEach(d => {
+            const dayStart = new Date(d + 'T00:00:00Z').getTime();
+            const dayEnd = new Date(d + 'T23:59:59.999Z').getTime() + 1;
+
+            const ws = Math.max(sMs, dayStart);
+            const we = Math.min(eMs, dayEnd);
+
+            if (we > ws) {
+                if (isBreak) {
+                    byDay[d].rawBreakIntervals.push([ws, we]);
+                } else {
+                    byDay[d].rawWorkIntervals.push([ws, we]);
+                    byDay[d].sessions.push({
+                        id: man.id,
+                        type: 'manual',
+                        note: man.note || man.type,
+                        startTime: man.startTime,
+                        endTime: man.endTime,
+                        minutes: Math.round((we - ws) / 60000)
+                    });
+                }
+            }
         });
     });
 
-    const days = dates.map(d => ({
-        date: d,
-        minutes: byDay[d].minutes,
-        sessions: byDay[d].sessions
-    }));
+    // 3. Process ActivityLog Breaks
+    breakRecords.forEach(b => {
+        const sMs = new Date(b.startTime || b.timestamp).getTime();
+        const durationSec = b.duration || 0;
+        const eMs = b.endTime ? new Date(b.endTime).getTime() : sMs + (durationSec * 1000);
+        if (isNaN(sMs) || isNaN(eMs) || eMs <= sMs) return;
+
+        dates.forEach(d => {
+            const dayStart = new Date(d + 'T00:00:00Z').getTime();
+            const dayEnd = new Date(d + 'T23:59:59.999Z').getTime() + 1;
+
+            const bs = Math.max(sMs, dayStart);
+            const be = Math.min(eMs, dayEnd);
+
+            if (be > bs) {
+                byDay[d].rawBreakIntervals.push([bs, be]);
+            }
+        });
+    });
+
+    // 4. Interval Merging & Break Subtraction for each Day
+    const days = dates.map(d => {
+        const mergedWork = mergeIntervals(byDay[d].rawWorkIntervals);
+        const mergedBreaks = mergeIntervals(byDay[d].rawBreakIntervals);
+        const netWork = subtractIntervals(mergedWork, mergedBreaks);
+
+        const grossMs = mergedWork.reduce((acc, [s, e]) => acc + (e - s), 0);
+        const netMs = netWork.reduce((acc, [s, e]) => acc + (e - s), 0);
+        const breakMs = Math.max(0, grossMs - netMs);
+
+        const netMinutes = Math.round(netMs / 60000);
+        const grossMinutes = Math.round(grossMs / 60000);
+        const breakMinutes = Math.round(breakMs / 60000);
+
+        return {
+            date: d,
+            minutes: netMinutes,
+            grossMinutes,
+            breakMinutes,
+            sessions: byDay[d].sessions
+        };
+    });
 
     return days;
 }
@@ -96,14 +219,21 @@ function buildDailyBreakdown(attendanceRecords, manualRecords, weekStart, nowMs 
  */
 function summarizeWeek(days, otThresholdMinutes = 2400) {
     const totalMinutes = days.reduce((acc, d) => acc + d.minutes, 0);
-    const regularMinutes = Math.min(totalMinutes, otThresholdMinutes);
-    const overtimeMinutes = Math.max(0, totalMinutes - otThresholdMinutes);
+    const totalGrossMinutes = days.reduce((acc, d) => acc + (d.grossMinutes || d.minutes), 0);
+    const totalBreakMinutes = days.reduce((acc, d) => acc + (d.breakMinutes || 0), 0);
+
+    const threshold = Number(otThresholdMinutes) > 0 ? Number(otThresholdMinutes) : 2400;
+    const regularMinutes = Math.min(totalMinutes, threshold);
+    const overtimeMinutes = Math.max(0, totalMinutes - threshold);
 
     return {
         totalMinutes,
+        totalGrossMinutes,
+        totalBreakMinutes,
         regularMinutes,
         overtimeMinutes,
-        overThreshold: overtimeMinutes > 0
+        overThreshold: overtimeMinutes > 0,
+        otThresholdMinutes: threshold
     };
 }
 
@@ -112,15 +242,18 @@ function summarizeWeek(days, otThresholdMinutes = 2400) {
  */
 function calculatePay(regularMinutes, overtimeMinutes, hourlyRate = 0, otMultiplierPct = 150) {
     const rate = Number(hourlyRate) || 0;
+    const multiplier = (Number(otMultiplierPct) > 0 ? Number(otMultiplierPct) : 150) / 100;
+
     const regularPay = Math.round(((regularMinutes / 60) * rate) * 100) / 100;
-    const overtimePay = Math.round(((overtimeMinutes / 60) * (rate * (otMultiplierPct / 100))) * 100) / 100;
+    const overtimePay = Math.round(((overtimeMinutes / 60) * (rate * multiplier)) * 100) / 100;
     const totalPay = Math.round((regularPay + overtimePay) * 100) / 100;
 
     return {
         hourlyRate: rate,
         regularPay,
         overtimePay,
-        totalPay
+        totalPay,
+        otMultiplierPct: multiplier * 100
     };
 }
 
@@ -129,6 +262,8 @@ module.exports = {
     addDays,
     mondayOf,
     weekDates,
+    mergeIntervals,
+    subtractIntervals,
     buildDailyBreakdown,
     summarizeWeek,
     calculatePay

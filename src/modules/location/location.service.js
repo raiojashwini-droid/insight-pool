@@ -7,6 +7,16 @@ const { getDistance } = require('../../utils/geo');
 const trackLocation = async (data) => {
     const { employeeId, organizationId, latitude, longitude, accuracy, source } = data;
 
+    // Guard: Reject deactivated employee
+    const emp = await prisma.employee.findUnique({ where: { id: employeeId }, select: { status: true } });
+    if (!emp) throw new Error('Employee not found');
+    if (emp.status === 'DEACTIVATED') {
+        const err = new Error('Cannot track location for a deactivated employee');
+        err.code = 'ACCOUNT_DEACTIVATED';
+        err.statusCode = 403;
+        throw err;
+    }
+
     // Check if location tracking is enabled
     const settings = await prisma.complianceSetting.findUnique({
         where: { organizationId }

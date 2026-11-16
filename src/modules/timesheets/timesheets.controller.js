@@ -11,25 +11,30 @@ const timesheetsController = {
             const organizationId = await getOrganizationId(req);
             const { role, employeeId } = req.user;
             const weekStart = req.query.week_start;
+            const options = {
+                teamId: req.query.team_id,
+                overtimeThreshold: req.query.overtime_threshold,
+                overtimeMultiplier: req.query.overtime_multiplier
+            };
 
             if (role === 'EMPLOYEE') {
                 if (!employeeId) {
                     return errorResponse(res, 'User profile is not linked to an employee record', 400);
                 }
-                const timesheet = await timesheetsService.getWeeklyTimesheet(organizationId, employeeId, weekStart);
+                const timesheet = await timesheetsService.getWeeklyTimesheet(organizationId, employeeId, weekStart, options);
                 return successResponse(res, timesheet, 'Weekly timesheet fetched successfully');
             }
 
             // Manager or Admin
             if (req.query.employee_id) {
-                const timesheet = await timesheetsService.getWeeklyTimesheet(organizationId, req.query.employee_id, weekStart);
+                const timesheet = await timesheetsService.getWeeklyTimesheet(organizationId, req.query.employee_id, weekStart, options);
                 return successResponse(res, timesheet, 'Weekly timesheet fetched successfully');
             }
 
             const allTimesheets = await timesheetsService.getWeeklyTimesheetsAll(
                 organizationId,
                 weekStart,
-                { teamId: req.query.team_id },
+                options,
                 req.user
             );
             return successResponse(res, allTimesheets, 'Weekly timesheets fetched successfully');
@@ -59,7 +64,14 @@ const timesheetsController = {
             const submitted = await timesheetsService.submitTimesheet(organizationId, targetEmployeeId, week_start);
             return successResponse(res, submitted, 'Timesheet submitted for approval successfully');
         } catch (error) {
-            const status = error.message.includes('already approved') ? 409 : 400;
+            const status = error.statusCode || (error.message.includes('already approved') ? 409 : 400);
+            if (error.code) {
+                return res.status(status).json({
+                    success: false,
+                    message: error.message,
+                    code: error.code
+                });
+            }
             return errorResponse(res, error.message, status);
         }
     },
@@ -168,10 +180,17 @@ const timesheetsController = {
                 return errorResponse(res, 'Access denied: Admin or Manager permission required', 403);
             }
 
+            const options = {
+                teamId: req.query.team_id,
+                overtimeThreshold: req.query.overtime_threshold,
+                overtimeMultiplier: req.query.overtime_multiplier
+            };
+
             const { csvContent, weekStart } = await timesheetsService.exportPayrollCsv(
                 organizationId,
                 req.query.week_start,
-                req.user
+                req.user,
+                options
             );
 
             res.setHeader('Content-Type', 'text/csv');
@@ -179,6 +198,27 @@ const timesheetsController = {
             return res.status(200).send(csvContent);
         } catch (error) {
             return errorResponse(res, error.message, 500);
+        }
+    },
+
+    /**
+     * Reopen an approved/rejected timesheet (Admin or Manager with reason)
+     */
+    reopen: async (req, res) => {
+        try {
+            const organizationId = await getOrganizationId(req);
+            const timesheetId = req.params.id;
+            const { reason } = req.body || {};
+
+            if (!reason || !String(reason).trim()) {
+                return errorResponse(res, 'A reason is required to reopen a timesheet', 400);
+            }
+
+            const result = await timesheetsService.reopenTimesheet(organizationId, timesheetId, req.user, reason);
+            return successResponse(res, result, 'Timesheet reopened successfully');
+        } catch (error) {
+            const status = error.statusCode || (error.message.includes('Access denied') ? 403 : 400);
+            return errorResponse(res, error.message, status);
         }
     }
 };

@@ -5,33 +5,77 @@ const authenticate = require('../../middlewares/auth');
 const { verifyToken } = require('../../utils/jwt');
 const { errorResponse } = require('../../utils/response');
 
+const prisma = require('../../config/db');
+
 // Custom middleware to handle both JWT (Manager/Admin) and Agent-specific Base64 tokens
-const combinedAuth = (req, res, next) => {
-    const authHeader = req.headers.authorization || req.headers.Authorization;
-    if (!authHeader) return errorResponse(res, 'Authentication required', 401);
-
-    const token = authHeader.startsWith('Bearer ') ? authHeader.split(' ')[1] : authHeader;
-
-    // 1. Try Agent Token (Base64)
+const combinedAuth = async (req, res, next) => {
     try {
-        const decoded = Buffer.from(token, 'base64').toString('ascii');
-        if (decoded.includes('INSIGHTFUL')) {
-            const [empId, devId] = decoded.split(':');
-            req.user = { employeeId: empId, deviceId: devId, role: 'AGENT' };
+        const authHeader = req.headers.authorization || req.headers.Authorization;
+        if (!authHeader) return errorResponse(res, 'Authentication required', 401);
+
+        const token = authHeader.startsWith('Bearer ') ? authHeader.split(' ')[1] : authHeader;
+
+        // 1. Try Agent Token (Base64)
+        try {
+            const decoded = Buffer.from(token, 'base64').toString('ascii');
+            if (decoded.includes('INSIGHTFUL')) {
+                const [empId, devId] = decoded.split(':');
+
+                // Verify employee is not deactivated
+                const emp = await prisma.employee.findUnique({
+                    where: { id: empId },
+                    select: { status: true }
+                });
+                if (emp && emp.status === 'DEACTIVATED') {
+                    return res.status(403).json({
+                        success: false,
+                        code: 'ACCOUNT_DEACTIVATED',
+                        message: 'This employee account has been deactivated. Tracking stopped.'
+                    });
+                }
+
+                req.user = { employeeId: empId, deviceId: devId, role: 'AGENT' };
+                return next();
+            }
+        } catch (e) {
+            // Not a base64 agent token, continue to JWT
+        }
+
+        // 2. Try JWT Token
+        const user = verifyToken(token);
+        if (user) {
+            let targetEmployeeId = user.employeeId;
+            if (!targetEmployeeId && user.userId) {
+                const dbUser = await prisma.user.findUnique({
+                    where: { id: user.userId },
+                    select: { employeeId: true }
+                });
+                targetEmployeeId = dbUser?.employeeId;
+            }
+
+            if (targetEmployeeId) {
+                const emp = await prisma.employee.findUnique({
+                    where: { id: targetEmployeeId },
+                    select: { status: true }
+                });
+                if (emp && emp.status === 'DEACTIVATED') {
+                    return res.status(403).json({
+                        success: false,
+                        code: 'ACCOUNT_DEACTIVATED',
+                        message: 'Your account has been deactivated. Please contact your administrator.'
+                    });
+                }
+            }
+
+            req.user = user;
             return next();
         }
-    } catch (e) {
-        // Not a base64 agent token, continue to JWT
-    }
 
-    // 2. Try JWT Token
-    const user = verifyToken(token);
-    if (user) {
-        req.user = user;
-        return next();
+        return errorResponse(res, 'Invalid or expired token', 401);
+    } catch (err) {
+        console.error('[CombinedAuth] Error checking agent auth:', err);
+        return errorResponse(res, 'Authentication check failed', 500);
     }
-
-    return errorResponse(res, 'Invalid or expired token', 401);
 };
 
 // Public routes

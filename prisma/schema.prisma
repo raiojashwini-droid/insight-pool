@@ -126,6 +126,7 @@ model Organization {
   screenshotSetting ScreenshotSetting?
   videoRecordings  VideoRecording[]
   timesheets       Timesheet[]
+  taskTimeLogs     TaskTimeLog[]
   notifications    Notification[]
   alertLogs        AlertLog[]
   createdAt        DateTime          @default(now())
@@ -203,6 +204,7 @@ model Employee {
   tracking           Tracking[]
   videoRecordings    VideoRecording[]
   timesheets         Timesheet[]
+  taskTimeLogs       TaskTimeLog[]
   alertLogs          AlertLog[]
   createdAt      DateTime       @default(now())
   updatedAt      DateTime       @updatedAt
@@ -267,6 +269,7 @@ model Task {
   createdAt      DateTime     @default(now())
   updatedAt      DateTime     @updatedAt
   activityLogs   ActivityLog[]
+  timeLogs       TaskTimeLog[]
 
   @@map("tasks")
 }
@@ -818,7 +821,7 @@ model Timesheet {
 
 model TimesheetApproval {
   id           String    @id @default(uuid())
-  timesheet    Timesheet @relation(fields: [timesheetId], references: [id], onDelete: Cascade)
+  timesheet    Timesheet @relation(fields: [timesheetId], references: [id])
   timesheetId  String
   approverId   String
   approverName String
@@ -828,6 +831,29 @@ model TimesheetApproval {
 
   @@index([timesheetId])
   @@map("timesheet_approvals")
+}
+
+model TaskTimeLog {
+  id             String       @id @default(uuid())
+  taskId         String
+  employeeId     String
+  organizationId String
+  startTime      DateTime
+  endTime        DateTime?
+  duration       Int          @default(0) // duration in seconds
+  isRunning      Boolean      @default(true)
+  source         String       @default("WEB") // "WEB" | "DESKTOP_AGENT"
+  createdAt      DateTime     @default(now())
+  updatedAt      DateTime     @updatedAt
+
+  task           Task         @relation(fields: [taskId], references: [id])
+  employee       Employee     @relation(fields: [employeeId], references: [id])
+  organization   Organization @relation(fields: [organizationId], references: [id])
+
+  @@index([employeeId, isRunning])
+  @@index([taskId])
+  @@index([organizationId])
+  @@map("task_time_logs")
 }
 
 model AlertLog {

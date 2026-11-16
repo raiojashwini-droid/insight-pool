@@ -13,7 +13,14 @@ const attendanceController = {
             const attendance = await attendanceService.clockIn(employeeId, organizationId);
             return successResponse(res, attendance, 'Clocked in successfully');
         } catch (error) {
-            const status = error.message.includes('Already clocked in') ? 400 : 500;
+            const status = error.statusCode || (error.message.includes('Already clocked in') ? 400 : 500);
+            if (error.code) {
+                return res.status(status).json({
+                    success: false,
+                    message: error.message,
+                    code: error.code
+                });
+            }
             return errorResponse(res, error.message, status);
         }
     },
@@ -47,7 +54,8 @@ const attendanceController = {
                 : await attendanceService.getTimesheets(organizationId, filters);
             return successResponse(res, timesheets, 'Timesheets fetched successfully');
         } catch (error) {
-            return errorResponse(res, error.message);
+            const status = error.statusCode || 400;
+            return errorResponse(res, error.message, status);
         }
     },
 
@@ -64,7 +72,8 @@ const attendanceController = {
             const manualTime = await attendanceService.addManualTime(data);
             return successResponse(res, manualTime, 'Manual time added successfully');
         } catch (error) {
-            return errorResponse(res, error.message);
+            const status = error.statusCode || 400;
+            return errorResponse(res, error.message, status);
         }
     },
 
@@ -81,7 +90,8 @@ const attendanceController = {
             const manualTimes = await attendanceService.getManualTimes(filters);
             return successResponse(res, manualTimes, 'Manual times fetched successfully');
         } catch (error) {
-            return errorResponse(res, error.message);
+            const status = error.statusCode || 400;
+            return errorResponse(res, error.message, status);
         }
     },
 
@@ -98,7 +108,8 @@ const attendanceController = {
             const shifts = await attendanceService.getShifts(organizationId, filters);
             return successResponse(res, shifts, 'Shifts fetched successfully');
         } catch (error) {
-            return errorResponse(res, error.message);
+            const status = error.statusCode || 400;
+            return errorResponse(res, error.message, status);
         }
     },
 
@@ -109,7 +120,8 @@ const attendanceController = {
             const shift = await attendanceService.createShift(data);
             return successResponse(res, shift, 'Shift scheduled successfully');
         } catch (error) {
-            return errorResponse(res, error.message);
+            const status = error.statusCode || 400;
+            return errorResponse(res, error.message, status);
         }
     },
 
@@ -120,7 +132,8 @@ const attendanceController = {
             const timeOff = await attendanceService.createTimeOff(data);
             return successResponse(res, timeOff, 'Time off added successfully');
         } catch (error) {
-            return errorResponse(res, error.message);
+            const status = error.statusCode || 400;
+            return errorResponse(res, error.message, status);
         }
     },
 
@@ -137,7 +150,8 @@ const attendanceController = {
             const timeOffs = await attendanceService.getTimeOffs(organizationId, filters);
             return successResponse(res, timeOffs, 'Time offs fetched successfully');
         } catch (error) {
-            return errorResponse(res, error.message);
+            const status = error.statusCode || 400;
+            return errorResponse(res, error.message, status);
         }
     },
 
@@ -152,7 +166,8 @@ const attendanceController = {
             const log = await attendanceService.startBreak(employeeId, organizationId);
             return successResponse(res, log, 'Break started successfully');
         } catch (error) {
-            return errorResponse(res, error.message);
+            const status = error.statusCode || 400;
+            return errorResponse(res, error.message, status);
         }
     },
 
@@ -166,7 +181,8 @@ const attendanceController = {
             const result = await attendanceService.endBreak(employeeId);
             return successResponse(res, result, 'Break ended successfully');
         } catch (error) {
-            return errorResponse(res, error.message);
+            const status = error.statusCode || 400;
+            return errorResponse(res, error.message, status);
         }
     }
 };

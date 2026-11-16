@@ -1,8 +1,17 @@
-const { PrismaClient } = require('@prisma/client');
-const prisma = new PrismaClient();
+const prisma = require('../../config/db');
 
 const activityService = {
     createActivityLog: async (data) => {
+        // Guard: Reject deactivated employee
+        const emp = await prisma.employee.findUnique({ where: { id: data.employeeId }, select: { status: true } });
+        if (!emp) throw new Error('Employee not found');
+        if (emp.status === 'DEACTIVATED') {
+            const err = new Error('Cannot log activity for a deactivated employee');
+            err.code = 'ACCOUNT_DEACTIVATED';
+            err.statusCode = 403;
+            throw err;
+        }
+
         const settings = await prisma.complianceSetting.findUnique({
             where: { organizationId: data.organizationId }
         });

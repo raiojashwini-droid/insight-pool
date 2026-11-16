@@ -1,4 +1,5 @@
 const prisma = require('../../config/db');
+const { mergeIntervals, subtractIntervals } = require('../../utils/timesheetCalc');
 
 /**
  * Get payroll summary for an organization
@@ -17,6 +18,9 @@ const getPayrollSummary = async (organizationId, params = {}) => {
     if (userId) employeeWhere.id = userId;
     else if (teamId) employeeWhere.teamId = teamId;
 
+    const startStr = start.toISOString().split('T')[0];
+    const endStr = end.toISOString().split('T')[0];
+
     const employees = await prisma.employee.findMany({
         where: employeeWhere,
         include: {
@@ -28,33 +32,81 @@ const getPayrollSummary = async (organizationId, params = {}) => {
                     startTime: { gte: start },
                     endTime: { lte: end }
                 }
+            },
+            activityLogs: {
+                where: {
+                    activityType: 'BREAK',
+                    timestamp: { gte: start, lte: end }
+                }
+            },
+            timesheets: {
+                where: {
+                    status: 'APPROVED',
+                    weekStart: { gte: startStr, lte: endStr }
+                }
             }
         }
     });
 
     let totalGross = 0;
     let totalHours = 0;
+    let approvedGross = 0;
+    let approvedHours = 0;
     
     employees.forEach(emp => {
-        // Attendance hours - Calculate from clockIn/clockOut if duration is 0
-        const attSeconds = emp.attendance.reduce((acc, a) => {
-            if (a.duration > 0) return acc + a.duration;
-            if (a.clockIn && a.clockOut) {
-                return acc + Math.floor((new Date(a.clockOut) - new Date(a.clockIn)) / 1000);
-            }
-            if (a.clockIn && !a.clockOut) {
-                // If currently clocked in, calculate until now
-                return acc + Math.floor((new Date() - new Date(a.clockIn)) / 1000);
-            }
-            return acc;
-        }, 0);
+        const hasApprovedTimesheets = emp.timesheets && emp.timesheets.length > 0;
 
-        // Manual time hours
-        const manualSeconds = (emp.manualTimeEntries || []).reduce((acc, m) => acc + (m.duration || 0), 0);
-        const empHours = (attSeconds + manualSeconds) / 3600;
+        if (hasApprovedTimesheets) {
+            // Authoritative: Use approved timesheet hours & pay
+            const tsHours = emp.timesheets.reduce((acc, t) => acc + (t.totalMinutes / 60), 0);
+            const tsPay = emp.timesheets.reduce((acc, t) => acc + t.totalPay, 0);
 
-        totalHours += empHours;
-        totalGross += empHours * (emp.hourlyRate || 0);
+            approvedHours += tsHours;
+            approvedGross += tsPay;
+            totalHours += tsHours;
+            totalGross += tsPay;
+        } else {
+            // Unapproved fallback: interval deduplication & break deduction
+            const workIntervals = [];
+            (emp.attendance || []).forEach(a => {
+                const s = new Date(a.clockIn).getTime();
+                const e = a.clockOut ? new Date(a.clockOut).getTime() : now.getTime();
+                if (e > s) workIntervals.push([s, e]);
+            });
+            (emp.manualTimeEntries || []).forEach(m => {
+                if (String(m.type || '').trim().toUpperCase() !== 'BREAK') {
+                    const s = new Date(m.startTime).getTime();
+                    const e = new Date(m.endTime).getTime();
+                    if (e > s) workIntervals.push([s, e]);
+                }
+            });
+
+            const breakIntervals = [];
+            (emp.activityLogs || []).forEach(b => {
+                const s = new Date(b.timestamp).getTime();
+                const durationSec = b.duration || 0;
+                const e = s + (durationSec * 1000);
+                if (e > s) breakIntervals.push([s, e]);
+            });
+            (emp.manualTimeEntries || []).forEach(m => {
+                if (String(m.type || '').trim().toUpperCase() === 'BREAK') {
+                    const s = new Date(m.startTime).getTime();
+                    const e = new Date(m.endTime).getTime();
+                    if (e > s) breakIntervals.push([s, e]);
+                }
+            });
+
+            const mergedWork = mergeIntervals(workIntervals);
+            const mergedBreaks = mergeIntervals(breakIntervals);
+            const netWork = subtractIntervals(mergedWork, mergedBreaks);
+
+            const netSeconds = netWork.reduce((acc, [s, e]) => acc + (e - s), 0) / 1000;
+            const empHours = netSeconds / 3600;
+            const empPay = empHours * (emp.hourlyRate || 0);
+
+            totalHours += empHours;
+            totalGross += empPay;
+        }
     });
 
     const avgRate = employees.length > 0
@@ -63,6 +115,10 @@ const getPayrollSummary = async (organizationId, params = {}) => {
 
     return {
         totalPayroll: Math.round(totalGross * 100) / 100,
+        approvedPayroll: Math.round(approvedGross * 100) / 100,
+        pendingPayroll: Math.round((totalGross - approvedGross) * 100) / 100,
+        totalHours: Math.round(totalHours * 100) / 100,
+        approvedHours: Math.round(approvedHours * 100) / 100,
         avgHourlyRate: Math.round(avgRate * 10) / 10,
         staffCount: employees.length,
         trend: 5.2,
@@ -87,6 +143,9 @@ const getPayrollRecords = async (organizationId, startDate, endDate, params = {}
     if (userId) employeeWhere.id = userId;
     else if (teamId) employeeWhere.teamId = teamId;
 
+    const startStr = start.toISOString().split('T')[0];
+    const endStr = end.toISOString().split('T')[0];
+
     const employees = await prisma.employee.findMany({
         where: employeeWhere,
         include: {
@@ -99,6 +158,18 @@ const getPayrollRecords = async (organizationId, startDate, endDate, params = {}
                     endTime: { lte: end }
                 }
             },
+            activityLogs: {
+                where: {
+                    activityType: 'BREAK',
+                    timestamp: { gte: start, lte: end }
+                }
+            },
+            timesheets: {
+                where: {
+                    weekStart: { gte: startStr, lte: endStr }
+                },
+                orderBy: { weekStart: 'desc' }
+            },
             team: { select: { name: true } }
         }
     });
@@ -106,31 +177,77 @@ const getPayrollRecords = async (organizationId, startDate, endDate, params = {}
     const periodLabel = `${start.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })} – ${end.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}`;
 
     return employees.map(emp => {
-        // Attendance (clock-in/out) seconds - Calculate dynamically if duration is 0
-        const attSeconds = emp.attendance.reduce((acc, a) => {
-            if (a.duration > 0) return acc + a.duration;
-            if (a.clockIn && a.clockOut) {
-                return acc + Math.floor((new Date(a.clockOut) - new Date(a.clockIn)) / 1000);
-            }
-            if (a.clockIn && !a.clockOut) {
-                return acc + Math.floor((new Date() - new Date(a.clockIn)) / 1000);
-            }
-            return acc;
-        }, 0);
-        
-        // Manual time seconds
-        const manualSeconds = (emp.manualTimeEntries || []).reduce((acc, m) => acc + (m.duration || 0), 0);
-        const totalSeconds = attSeconds + manualSeconds;
-        const totalHours = Math.round((totalSeconds / 3600) * 100) / 100;
+        const approvedTimesheets = (emp.timesheets || []).filter(t => t.status === 'APPROVED');
+        const hasApprovedTimesheets = approvedTimesheets.length > 0;
 
-        // Calculate overtime: anything over 8h/day is OT
-        const workDays = emp.attendance.length;
-        const regularSeconds = workDays * 8 * 3600;
-        const overtimeSeconds = Math.max(0, attSeconds - regularSeconds);
-        const overtimeHours = Math.round((overtimeSeconds / 3600) * 100) / 100;
+        let totalHours = 0;
+        let overtimeHours = 0;
+        let grossPay = 0;
+        let timesheetStatus = 'PENDING_APPROVAL';
 
         const rate = emp.hourlyRate || 0;
-        const grossPay = Math.round(totalHours * rate * 100) / 100;
+
+        if (hasApprovedTimesheets) {
+            // Authoritative: Use approved timesheet hours & pay
+            const totalMinutes = approvedTimesheets.reduce((acc, t) => acc + (t.totalMinutes || 0), 0);
+            const otMinutes = approvedTimesheets.reduce((acc, t) => acc + (t.overtimeMinutes || 0), 0);
+            totalHours = Math.round((totalMinutes / 60) * 100) / 100;
+            overtimeHours = Math.round((otMinutes / 60) * 100) / 100;
+            grossPay = Math.round(approvedTimesheets.reduce((acc, t) => acc + (t.totalPay || 0), 0) * 100) / 100;
+            timesheetStatus = 'APPROVED';
+        } else {
+            // Unapproved calculation with interval deduplication & break deduction
+            const workIntervals = [];
+            (emp.attendance || []).forEach(a => {
+                const s = new Date(a.clockIn).getTime();
+                const e = a.clockOut ? new Date(a.clockOut).getTime() : now.getTime();
+                if (e > s) workIntervals.push([s, e]);
+            });
+            (emp.manualTimeEntries || []).forEach(m => {
+                if (String(m.type || '').trim().toUpperCase() !== 'BREAK') {
+                    const s = new Date(m.startTime).getTime();
+                    const e = new Date(m.endTime).getTime();
+                    if (e > s) workIntervals.push([s, e]);
+                }
+            });
+
+            const breakIntervals = [];
+            (emp.activityLogs || []).forEach(b => {
+                const s = new Date(b.timestamp).getTime();
+                const durationSec = b.duration || 0;
+                const e = s + (durationSec * 1000);
+                if (e > s) breakIntervals.push([s, e]);
+            });
+            (emp.manualTimeEntries || []).forEach(m => {
+                if (String(m.type || '').trim().toUpperCase() === 'BREAK') {
+                    const s = new Date(m.startTime).getTime();
+                    const e = new Date(m.endTime).getTime();
+                    if (e > s) breakIntervals.push([s, e]);
+                }
+            });
+
+            const mergedWork = mergeIntervals(workIntervals);
+            const mergedBreaks = mergeIntervals(breakIntervals);
+            const netWork = subtractIntervals(mergedWork, mergedBreaks);
+
+            const netSeconds = netWork.reduce((acc, [s, e]) => acc + (e - s), 0) / 1000;
+            totalHours = Math.round((netSeconds / 3600) * 100) / 100;
+
+            const workDays = (emp.attendance && emp.attendance.length > 0) ? emp.attendance.length : 1;
+            const regularSeconds = workDays * 8 * 3600;
+            const overtimeSeconds = Math.max(0, netSeconds - regularSeconds);
+            overtimeHours = Math.round((overtimeSeconds / 3600) * 100) / 100;
+
+            const regularHours = Math.min(totalHours, Math.round((regularSeconds / 3600) * 100) / 100);
+            grossPay = Math.round(((regularHours * rate) + (overtimeHours * rate * 1.5)) * 100) / 100;
+
+            const latestTs = emp.timesheets && emp.timesheets[0];
+            if (latestTs) {
+                timesheetStatus = latestTs.status;
+            } else {
+                timesheetStatus = totalHours > 0 ? 'PENDING_APPROVAL' : 'NO_HOURS';
+            }
+        }
 
         // Tax deductions: 20%
         const deductions = Math.round(grossPay * 0.2 * 100) / 100;
@@ -149,7 +266,8 @@ const getPayrollRecords = async (organizationId, startDate, endDate, params = {}
             grossPay,
             deductions,
             netPay,
-            status: totalHours > 0 ? 'Ready' : 'Pending',
+            status: timesheetStatus === 'APPROVED' ? 'Approved' : (totalHours > 0 ? 'Pending' : 'No Hours'),
+            timesheetStatus,
         };
     });
 };

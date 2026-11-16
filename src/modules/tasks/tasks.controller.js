@@ -104,7 +104,113 @@ class TasksController {
             await tasksService.deleteTask(id);
             return successResponse(res, null, 'Task deleted successfully');
         } catch (error) {
-            return errorResponse(res, error.message);
+            return errorResponse(res, error.message, error.statusCode || 500);
+        }
+    }
+
+    async startTimer(req, res) {
+        try {
+            const organizationId = await getOrganizationId(req);
+            const taskId = req.params.id || req.body.taskId;
+            if (!taskId) {
+                return errorResponse(res, 'Task ID is required', 400);
+            }
+
+            let effectiveEmployeeId = req.user.employeeId;
+            if (!effectiveEmployeeId && req.user.userId) {
+                const user = await require('../../config/db').user.findUnique({
+                    where: { id: req.user.userId },
+                    select: { employeeId: true }
+                });
+                effectiveEmployeeId = user?.employeeId;
+            }
+
+            if (!effectiveEmployeeId) {
+                return errorResponse(res, 'Employee profile required to start task timer', 400);
+            }
+
+            const source = req.body.source || 'WEB';
+            const timer = await tasksService.startTimer(
+                taskId,
+                effectiveEmployeeId,
+                organizationId,
+                source,
+                req.user.role
+            );
+            return successResponse(res, timer, 'Task timer started successfully', 201);
+        } catch (error) {
+            if (error.code === 'ACCOUNT_DEACTIVATED') {
+                return res.status(403).json({
+                    success: false,
+                    code: 'ACCOUNT_DEACTIVATED',
+                    message: error.message
+                });
+            }
+            return errorResponse(res, error.message, error.statusCode || 500);
+        }
+    }
+
+    async stopTimer(req, res) {
+        try {
+            const organizationId = await getOrganizationId(req);
+            const taskId = req.params.id || req.body.taskId;
+
+            let effectiveEmployeeId = req.user.employeeId;
+            if (!effectiveEmployeeId && req.user.userId) {
+                const user = await require('../../config/db').user.findUnique({
+                    where: { id: req.user.userId },
+                    select: { employeeId: true }
+                });
+                effectiveEmployeeId = user?.employeeId;
+            }
+
+            if (!effectiveEmployeeId) {
+                return errorResponse(res, 'Employee profile required to stop task timer', 400);
+            }
+
+            const timer = await tasksService.stopTimer(taskId, effectiveEmployeeId, organizationId);
+            return successResponse(res, timer, 'Task timer stopped successfully');
+        } catch (error) {
+            return errorResponse(res, error.message, error.statusCode || 500);
+        }
+    }
+
+    async getActiveTimer(req, res) {
+        try {
+            const organizationId = await getOrganizationId(req);
+            let effectiveEmployeeId = req.user.employeeId;
+            if (!effectiveEmployeeId && req.user.userId) {
+                const user = await require('../../config/db').user.findUnique({
+                    where: { id: req.user.userId },
+                    select: { employeeId: true }
+                });
+                effectiveEmployeeId = user?.employeeId;
+            }
+
+            // Allow manager/admin to view active timer of a specific employee via query
+            if (req.query.employeeId && (req.user.role === 'ADMIN' || req.user.role === 'MANAGER')) {
+                effectiveEmployeeId = req.query.employeeId;
+            }
+
+            if (!effectiveEmployeeId) {
+                return errorResponse(res, 'Employee profile required to query task timer', 400);
+            }
+
+            const session = await tasksService.getActiveTimer(effectiveEmployeeId, organizationId);
+            return successResponse(res, session, 'Active timer session retrieved');
+        } catch (error) {
+            return errorResponse(res, error.message, error.statusCode || 500);
+        }
+    }
+
+    async getTaskTimeLogs(req, res) {
+        try {
+            const organizationId = await getOrganizationId(req);
+            const { id } = req.params;
+            const data = await tasksService.getTaskTimeLogs(id, organizationId);
+            return successResponse(res, data, 'Task time logs retrieved successfully');
+        } catch (error) {
+            return errorResponse(res, error.message, error.statusCode || 500);
         }
     }
 

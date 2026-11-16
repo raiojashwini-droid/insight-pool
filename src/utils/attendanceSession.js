@@ -18,6 +18,15 @@ async function touchAgentLastSeen(employeeId) {
 async function onAgentPulse(employeeId, organizationId) {
     if (!employeeId) return;
 
+    // Guard: Never pulse attendance or update status for deactivated employees
+    const emp = await prisma.employee.findUnique({
+        where: { id: employeeId },
+        select: { status: true }
+    });
+    if (emp?.status === 'DEACTIVATED') {
+        return;
+    }
+
     await touchAgentLastSeen(employeeId);
 
     try {
@@ -51,6 +60,12 @@ async function processStaleAttendanceForEmployee(employeeId) {
     if (!open) return false;
 
     try {
+        try {
+            const tasksService = require('../modules/tasks/tasks.service');
+            await tasksService.stopActiveTimerForEmployee(employeeId, agent.lastSeen || new Date());
+        } catch (tErr) {
+            console.error(`[AttendanceSession] Auto-stopping task timer on stale session failed for ${employeeId}:`, tErr.message);
+        }
         await attendanceService.clockOut(employeeId);
         return true;
     } catch (err) {

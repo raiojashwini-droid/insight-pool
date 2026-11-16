@@ -36,10 +36,28 @@ const register = async (req, res) => {
             include: { employee: true }
         });
 
+        // CRITICAL CHECK: Reject deactivated employee immediately
+        if (user?.employee?.status === 'DEACTIVATED') {
+            return res.status(403).json({
+                success: false,
+                code: 'ACCOUNT_DEACTIVATED',
+                message: 'This employee account has been deactivated. Please contact your administrator.'
+            });
+        }
+
+        const existingEmpCheck = await prisma.employee.findUnique({ where: { email } });
+        if (existingEmpCheck && existingEmpCheck.status === 'DEACTIVATED') {
+            return res.status(403).json({
+                success: false,
+                code: 'ACCOUNT_DEACTIVATED',
+                message: 'This employee account has been deactivated. Please contact your administrator.'
+            });
+        }
+
         if (!user) {
             console.log(`User record not found for: ${email}. Checking for existing employee...`);
             
-            let existingEmployee = invitedEmployee || await prisma.employee.findUnique({ where: { email } });
+            let existingEmployee = invitedEmployee || existingEmpCheck;
             
             if (!existingEmployee) {
                 console.log(`Creating new employee for: ${email}`);
@@ -80,7 +98,7 @@ const register = async (req, res) => {
                 where: { id: existingEmployee.id },
                 data: {
                     fullName: name || existingEmployee.fullName,
-                    status: 'ACTIVE',
+                    ...(existingEmployee.status === 'INVITED' ? { status: 'ACTIVE' } : {}),
                 },
             });
         } else {
@@ -93,6 +111,13 @@ const register = async (req, res) => {
             if (!user.employee) {
                 // If user exists but has no employee record (shouldn't happen with our schema but good to handle)
                 let existingEmployee = await prisma.employee.findUnique({ where: { email } });
+                if (existingEmployee && existingEmployee.status === 'DEACTIVATED') {
+                    return res.status(403).json({
+                        success: false,
+                        code: 'ACCOUNT_DEACTIVATED',
+                        message: 'This employee account has been deactivated. Please contact your administrator.'
+                    });
+                }
                 if (!existingEmployee) {
                     const org = await prisma.organization.findFirst();
                     existingEmployee = await prisma.employee.create({
@@ -118,7 +143,10 @@ const register = async (req, res) => {
             if (name && user.employee) {
                 await prisma.employee.update({
                     where: { id: user.employee.id },
-                    data: { fullName: name, status: 'ACTIVE' },
+                    data: {
+                        fullName: name,
+                        ...(user.employee.status === 'INVITED' ? { status: 'ACTIVE' } : {})
+                    },
                 });
             }
         }
@@ -151,8 +179,20 @@ const heartbeat = async (req, res) => {
         const { deviceId } = req.body;
         if (!deviceId) return errorResponse(res, 'Device ID is required', 400);
 
-        const agent = await prisma.agent.findUnique({ where: { deviceId } });
+        const agent = await prisma.agent.findUnique({ 
+            where: { deviceId },
+            include: { employee: true }
+        });
         if (!agent) return errorResponse(res, 'Agent not found', 404);
+
+        // Check if Employee is Deactivated
+        if (agent.employee?.status === 'DEACTIVATED') {
+            return res.status(403).json({
+                success: false,
+                code: 'ACCOUNT_DEACTIVATED',
+                message: 'This employee account has been deactivated. Tracking stopped.'
+            });
+        }
 
         // Check if Approved
         if (agent.status !== 'active') {
@@ -162,6 +202,13 @@ const heartbeat = async (req, res) => {
         await agentService.heartbeat(deviceId);
         return successResponse(res, null, 'Heartbeat received');
     } catch (error) {
+        if (error.code === 'ACCOUNT_DEACTIVATED') {
+            return res.status(403).json({
+                success: false,
+                code: 'ACCOUNT_DEACTIVATED',
+                message: error.message
+            });
+        }
         console.error('Agent heartbeat error:', error);
         return errorResponse(res, error.message || 'Heartbeat failed', 500);
     }
@@ -179,7 +226,18 @@ const logActivity = async (req, res) => {
             where: { employeeId },
             include: { employee: true }
         });
-        if (!agent || agent.status !== 'active') {
+        if (!agent) return errorResponse(res, 'Agent not found', 404);
+
+        // Check if Employee is Deactivated
+        if (agent.employee?.status === 'DEACTIVATED') {
+            return res.status(403).json({
+                success: false,
+                code: 'ACCOUNT_DEACTIVATED',
+                message: 'This employee account has been deactivated. Tracking stopped.'
+            });
+        }
+
+        if (agent.status !== 'active') {
             return errorResponse(res, 'Agent is not active or approved', 403);
         }
 

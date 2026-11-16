@@ -14,6 +14,20 @@ const videosController = {
             if (!employeeId) {
                 return errorResponse(res, 'employeeId is required', 400);
             }
+
+            // Guard: Reject deactivated employee
+            const emp = await prisma.employee.findUnique({ where: { id: employeeId }, select: { status: true } });
+            if (!emp) {
+                return errorResponse(res, 'Employee not found', 404);
+            }
+            if (emp.status === 'DEACTIVATED') {
+                return res.status(403).json({
+                    success: false,
+                    code: 'ACCOUNT_DEACTIVATED',
+                    message: 'Cannot upload video for a deactivated employee'
+                });
+            }
+
             if (!req.file) {
                 return errorResponse(res, 'video file is required', 400);
             }

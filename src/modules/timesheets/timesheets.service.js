@@ -9,9 +9,59 @@ const {
 
 const timesheetsService = {
     /**
+     * Get configurable overtime settings from organization schedule or explicit parameters
+     */
+    getOvertimeConfig: async (organizationId, employeeId = null, options = {}) => {
+        let thresholdMinutes = options.overtimeThreshold || options.overtime_threshold;
+        let multiplierPct = options.overtimeMultiplier || options.overtime_multiplier;
+
+        if (thresholdMinutes) {
+            thresholdMinutes = Number(thresholdMinutes);
+            // If in hours (e.g. 40, 35, 48), convert to minutes
+            if (thresholdMinutes <= 168) thresholdMinutes = Math.round(thresholdMinutes * 60);
+        }
+
+        if (multiplierPct) {
+            multiplierPct = Number(multiplierPct);
+            // If passed as decimal (e.g. 1.5, 2.0), convert to percentage (150, 200)
+            if (multiplierPct <= 5) multiplierPct = Math.round(multiplierPct * 100);
+        }
+
+        if (thresholdMinutes && multiplierPct) {
+            return { thresholdMinutes, multiplierPct };
+        }
+
+        // Check organization settings
+        const org = await prisma.organization.findUnique({
+            where: { id: organizationId },
+            select: { workStartTime: true, workEndTime: true, workDays: true }
+        });
+
+        if (org && !thresholdMinutes) {
+            try {
+                const daysList = (org.workDays || 'Monday,Tuesday,Wednesday,Thursday,Friday').split(',').map(s => s.trim()).filter(Boolean);
+                const [sH, sM] = (org.workStartTime || '09:00').split(':').map(Number);
+                const [eH, eM] = (org.workEndTime || '18:00').split(':').map(Number);
+                let dailyHours = (eH + (eM || 0) / 60) - (sH + (sM || 0) / 60);
+                if (dailyHours > 5) dailyHours -= 1; // 1 hr standard break
+                if (dailyHours > 0 && daysList.length > 0) {
+                    thresholdMinutes = Math.round(daysList.length * dailyHours * 60);
+                }
+            } catch (e) {
+                // fallback
+            }
+        }
+
+        return {
+            thresholdMinutes: thresholdMinutes || 2400, // 40h standard
+            multiplierPct: multiplierPct || 150        // 1.5x standard
+        };
+    },
+
+    /**
      * Get or create weekly timesheet for a single employee
      */
-    getWeeklyTimesheet: async (organizationId, employeeId, weekInput) => {
+    getWeeklyTimesheet: async (organizationId, employeeId, weekInput, options = {}) => {
         const weekStart = mondayOf(weekInput || new Date());
         const weekEnd = addDays(weekStart, 7);
 
@@ -26,13 +76,18 @@ const timesheetsService = {
 
         const startMs = new Date(weekStart + 'T00:00:00Z');
         const endMs = new Date(weekEnd + 'T00:00:00Z');
+        const bufferStart = new Date(startMs.getTime() - 86400000);
+        const bufferEnd = new Date(endMs.getTime() + 86400000);
 
-        // Fetch Attendance sessions for this week
+        // Fetch Attendance sessions for this week (buffered for cross-midnight coverage)
         const attendance = await prisma.attendance.findMany({
             where: {
                 employeeId,
                 organizationId,
-                date: { gte: startMs, lt: endMs }
+                OR: [
+                    { date: { gte: startMs, lt: endMs } },
+                    { clockIn: { gte: bufferStart, lt: bufferEnd } }
+                ]
             },
             orderBy: { clockIn: 'asc' }
         });
@@ -42,15 +97,29 @@ const timesheetsService = {
             where: {
                 employeeId,
                 organizationId,
-                startTime: { gte: startMs, lt: endMs }
+                startTime: { gte: bufferStart, lt: bufferEnd }
             },
             orderBy: { startTime: 'asc' }
         });
 
-        // Compute 7-day breakdown and week rollup
-        const days = buildDailyBreakdown(attendance, manualTimes, weekStart);
-        const summary = summarizeWeek(days, 2400); // 40h regular threshold
-        const pay = calculatePay(summary.regularMinutes, summary.overtimeMinutes, employee.hourlyRate, 150);
+        // Fetch ActivityLog break entries for this week
+        const breakLogs = await prisma.activityLog.findMany({
+            where: {
+                employeeId,
+                organizationId,
+                activityType: 'BREAK',
+                timestamp: { gte: bufferStart, lt: bufferEnd }
+            },
+            orderBy: { timestamp: 'asc' }
+        });
+
+        // Overtime configuration (organization schedule or explicit parameters)
+        const otConfig = await timesheetsService.getOvertimeConfig(organizationId, employeeId, options);
+
+        // Compute 7-day breakdown and week rollup with break deductions & interval merging
+        const days = buildDailyBreakdown(attendance, manualTimes, breakLogs, weekStart);
+        const summary = summarizeWeek(days, otConfig.thresholdMinutes);
+        const pay = calculatePay(summary.regularMinutes, summary.overtimeMinutes, employee.hourlyRate, otConfig.multiplierPct);
 
         // Find or create Timesheet record
         let timesheet = await prisma.timesheet.findUnique({
@@ -86,8 +155,8 @@ const timesheetsService = {
                     }
                 }
             });
-        } else if (timesheet.status === 'DRAFT') {
-            // Keep DRAFT timesheet metrics synchronized with current live tracked hours
+        } else if (timesheet.status === 'DRAFT' || timesheet.status === 'REJECTED') {
+            // Keep DRAFT / REJECTED timesheet metrics synchronized with current live tracked hours
             timesheet = await prisma.timesheet.update({
                 where: { id: timesheet.id },
                 data: {
@@ -104,6 +173,8 @@ const timesheetsService = {
             });
         }
 
+        const isLive = timesheet.status === 'DRAFT' || timesheet.status === 'REJECTED';
+
         return {
             timesheetId: timesheet.id,
             employeeId: employee.id,
@@ -116,13 +187,17 @@ const timesheetsService = {
             status: timesheet.status,
             submittedAt: timesheet.submittedAt,
             days,
-            totalMinutes: timesheet.status === 'DRAFT' ? summary.totalMinutes : timesheet.totalMinutes,
-            regularMinutes: timesheet.status === 'DRAFT' ? summary.regularMinutes : timesheet.regularMinutes,
-            overtimeMinutes: timesheet.status === 'DRAFT' ? summary.overtimeMinutes : timesheet.overtimeMinutes,
-            overThreshold: (timesheet.status === 'DRAFT' ? summary.overtimeMinutes : timesheet.overtimeMinutes) > 0,
+            totalMinutes: isLive ? summary.totalMinutes : timesheet.totalMinutes,
+            regularMinutes: isLive ? summary.regularMinutes : timesheet.regularMinutes,
+            overtimeMinutes: isLive ? summary.overtimeMinutes : timesheet.overtimeMinutes,
+            overThreshold: (isLive ? summary.overtimeMinutes : timesheet.overtimeMinutes) > 0,
             regularPay: pay.regularPay,
             overtimePay: pay.overtimePay,
-            totalPay: timesheet.status === 'DRAFT' ? pay.totalPay : timesheet.totalPay,
+            totalPay: isLive ? pay.totalPay : timesheet.totalPay,
+            totalGrossMinutes: summary.totalGrossMinutes,
+            totalBreakMinutes: summary.totalBreakMinutes,
+            otThresholdMinutes: otConfig.thresholdMinutes,
+            otMultiplierPct: otConfig.multiplierPct,
             approvals: timesheet.approvals
         };
     },
@@ -157,47 +232,86 @@ const timesheetsService = {
         });
 
         const list = await Promise.all(
-            employees.map(emp => timesheetsService.getWeeklyTimesheet(organizationId, emp.id, weekStart))
+            employees.map(emp => timesheetsService.getWeeklyTimesheet(organizationId, emp.id, weekStart, filters))
         );
 
         return list;
     },
 
     /**
-     * Submit timesheet for approval
+     * Submit timesheet for approval (supports initial submission and resubmission after rejection)
      */
     submitTimesheet: async (organizationId, employeeId, weekInput) => {
         const weekStart = mondayOf(weekInput || new Date());
+
+        // Guard: Prevent deactivated employees from submitting timesheets
+        const emp = await prisma.employee.findUnique({
+            where: { id: employeeId },
+            select: { status: true, fullName: true }
+        });
+        if (!emp) throw new Error('Employee not found');
+        if (emp.status === 'DEACTIVATED') {
+            const err = new Error('Cannot submit timesheet: Employee account is deactivated');
+            err.code = 'ACCOUNT_DEACTIVATED';
+            err.statusCode = 403;
+            throw err;
+        }
 
         // Compute current metrics before locking submission
         const currentPayload = await timesheetsService.getWeeklyTimesheet(organizationId, employeeId, weekStart);
 
         if (currentPayload.status === 'APPROVED') {
-            throw new Error('Timesheet is already approved and cannot be re-submitted');
+            const err = new Error('Timesheet is already approved and cannot be re-submitted');
+            err.statusCode = 409;
+            throw err;
         }
 
-        const updated = await prisma.timesheet.update({
-            where: { id: currentPayload.timesheetId },
-            data: {
-                status: 'SUBMITTED',
-                submittedAt: new Date(),
-                totalMinutes: currentPayload.totalMinutes,
-                regularMinutes: currentPayload.regularMinutes,
-                overtimeMinutes: currentPayload.overtimeMinutes,
-                totalPay: currentPayload.totalPay
-            },
-            include: {
-                approvals: {
-                    orderBy: { createdAt: 'desc' }
+        const isResubmission = currentPayload.status === 'REJECTED';
+
+        const updated = await prisma.$transaction(async (tx) => {
+            const ts = await tx.timesheet.update({
+                where: { id: currentPayload.timesheetId },
+                data: {
+                    status: 'SUBMITTED',
+                    submittedAt: new Date(),
+                    totalMinutes: currentPayload.totalMinutes,
+                    regularMinutes: currentPayload.regularMinutes,
+                    overtimeMinutes: currentPayload.overtimeMinutes,
+                    totalPay: currentPayload.totalPay
+                },
+                include: {
+                    approvals: {
+                        orderBy: { createdAt: 'desc' }
+                    }
                 }
+            });
+
+            if (isResubmission) {
+                await tx.timesheetApproval.create({
+                    data: {
+                        timesheetId: currentPayload.timesheetId,
+                        approverId: employeeId,
+                        approverName: emp.fullName,
+                        decision: 'RESUBMITTED',
+                        comment: 'Timesheet resubmitted with corrections'
+                    }
+                });
             }
+
+            return ts;
+        });
+
+        // Refetch latest approvals
+        const latestApprovals = await prisma.timesheetApproval.findMany({
+            where: { timesheetId: currentPayload.timesheetId },
+            orderBy: { createdAt: 'desc' }
         });
 
         return {
             ...currentPayload,
             status: updated.status,
             submittedAt: updated.submittedAt,
-            approvals: updated.approvals
+            approvals: latestApprovals
         };
     },
 
@@ -346,9 +460,9 @@ const timesheetsService = {
     /**
      * Payroll CSV Export
      */
-    exportPayrollCsv: async (organizationId, weekInput, requester) => {
+    exportPayrollCsv: async (organizationId, weekInput, requester, options = {}) => {
         const weekStart = mondayOf(weekInput || new Date());
-        const timesheets = await timesheetsService.getWeeklyTimesheetsAll(organizationId, weekStart, {}, requester);
+        const timesheets = await timesheetsService.getWeeklyTimesheetsAll(organizationId, weekStart, options, requester);
 
         const esc = (v) => `"${String(v ?? '').replace(/"/g, '""')}"`;
         const headers = [
@@ -357,6 +471,8 @@ const timesheetsService = {
             'Team',
             'Period Start',
             'Period End',
+            'Gross Hours',
+            'Break Hours',
             'Regular Hours',
             'Overtime Hours',
             'Total Hours',
@@ -373,6 +489,8 @@ const timesheetsService = {
             esc(t.teamName),
             t.weekStart,
             t.weekEnd,
+            (((t.totalGrossMinutes != null ? t.totalGrossMinutes : t.totalMinutes)) / 60).toFixed(2),
+            (((t.totalBreakMinutes || 0)) / 60).toFixed(2),
             (t.regularMinutes / 60).toFixed(2),
             (t.overtimeMinutes / 60).toFixed(2),
             (t.totalMinutes / 60).toFixed(2),
@@ -385,6 +503,102 @@ const timesheetsService = {
 
         const csvContent = [headers.join(','), ...rows.map(r => r.join(','))].join('\n');
         return { csvContent, weekStart };
+    },
+
+    /**
+     * Controlled Reopening of a Timesheet with Audit Trail
+     */
+    reopenTimesheet: async (organizationId, timesheetId, requester, reason = '') => {
+        if (!reason || !String(reason).trim()) {
+            const err = new Error('A reason is required to reopen a timesheet');
+            err.statusCode = 400;
+            throw err;
+        }
+
+        const timesheet = await prisma.timesheet.findUnique({
+            where: { id: timesheetId },
+            include: {
+                employee: { select: { id: true, fullName: true, teamId: true } }
+            }
+        });
+
+        if (!timesheet || timesheet.organizationId !== organizationId) {
+            const err = new Error('Timesheet not found');
+            err.statusCode = 404;
+            throw err;
+        }
+
+        // Permissions: Only Admin or Manager can reopen
+        if (requester.role === 'EMPLOYEE') {
+            const err = new Error('Access denied: Only administrators or managers can reopen timesheets');
+            err.statusCode = 403;
+            throw err;
+        }
+
+        if (requester.role === 'MANAGER') {
+            const manager = await prisma.employee.findUnique({
+                where: { id: requester.employeeId },
+                select: { teamId: true }
+            });
+            if (!manager?.teamId || manager.teamId !== timesheet.employee.teamId) {
+                const err = new Error('Access denied: You can only reopen timesheets for your assigned team members');
+                err.statusCode = 403;
+                throw err;
+            }
+        }
+
+        if (timesheet.status === 'DRAFT') {
+            const err = new Error('Timesheet is already in DRAFT status');
+            err.statusCode = 400;
+            throw err;
+        }
+
+        const cleanReason = String(reason).trim();
+
+        // Transaction: update status back to DRAFT and append approval audit record
+        await prisma.$transaction([
+            prisma.timesheet.update({
+                where: { id: timesheet.id },
+                data: { status: 'DRAFT' }
+            }),
+            prisma.timesheetApproval.create({
+                data: {
+                    timesheetId: timesheet.id,
+                    approverId: requester.employeeId || requester.userId || 'admin',
+                    approverName: requester.name || requester.email || (requester.role === 'ADMIN' ? 'Administrator' : 'Manager'),
+                    decision: 'REOPENED',
+                    comment: cleanReason
+                }
+            })
+        ]);
+
+        return await timesheetsService.getWeeklyTimesheet(organizationId, timesheet.employeeId, timesheet.weekStart);
+    },
+
+    /**
+     * Check if a specific date period is locked by an approved timesheet
+     */
+    isPeriodLocked: async (organizationId, employeeId, targetDate) => {
+        if (!targetDate || !employeeId) return false;
+        try {
+            const d = new Date(targetDate);
+            const weekStart = mondayOf(d);
+
+            const approvedTimesheet = await prisma.timesheet.findUnique({
+                where: {
+                    organizationId_employeeId_weekStart: {
+                        organizationId,
+                        employeeId,
+                        weekStart
+                    }
+                },
+                select: { id: true, status: true }
+            });
+
+            return approvedTimesheet?.status === 'APPROVED';
+        } catch (e) {
+            return false;
+        }
     }
 };
 

@@ -3,6 +3,16 @@ const { deleteImageByUrl } = require('../../utils/imageStorage');
 
 class ScreenshotsService {
     async createScreenshot(data) {
+        if (data.employeeId) {
+            const emp = await prisma.employee.findUnique({ where: { id: data.employeeId }, select: { status: true } });
+            if (emp?.status === 'DEACTIVATED') {
+                const err = new Error('Cannot save screenshots for a deactivated employee');
+                err.code = 'ACCOUNT_DEACTIVATED';
+                err.statusCode = 403;
+                throw err;
+            }
+        }
+
         return await prisma.screenshot.create({
             data
         });

@@ -116,6 +116,20 @@ class ProjectsService {
     }
 
     async assignEmployees(projectId, employeeIds) {
+        if (employeeIds && employeeIds.length > 0) {
+            const deactivated = await prisma.employee.findMany({
+                where: { id: { in: employeeIds }, status: 'DEACTIVATED' },
+                select: { fullName: true }
+            });
+            if (deactivated.length > 0) {
+                const names = deactivated.map(e => e.fullName).join(', ');
+                const err = new Error(`Cannot assign deactivated employee(s) to project: ${names}`);
+                err.code = 'ACCOUNT_DEACTIVATED';
+                err.statusCode = 403;
+                throw err;
+            }
+        }
+
         return await prisma.projectAssignment.createMany({
             data: employeeIds.map(employeeId => ({
                 projectId,
@@ -127,6 +141,16 @@ class ProjectsService {
 
     async logTime(data) {
         const { projectId, employeeId, duration, type } = data;
+
+        const emp = await prisma.employee.findUnique({ where: { id: employeeId }, select: { status: true } });
+        if (!emp) throw new Error('Employee not found');
+        if (emp.status === 'DEACTIVATED') {
+            const err = new Error('Cannot log time for a deactivated employee');
+            err.code = 'ACCOUNT_DEACTIVATED';
+            err.statusCode = 403;
+            throw err;
+        }
+
         return await prisma.projectTimeLog.create({
             data: {
                 projectId,
