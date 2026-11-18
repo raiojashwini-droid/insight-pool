@@ -113,6 +113,34 @@ const getPayrollSummary = async (organizationId, params = {}) => {
         ? employees.reduce((acc, e) => acc + (e.hourlyRate || 0), 0) / employees.length
         : 0;
 
+    // Calculate real monthly earnings trend for the last 6 months from Prisma database records
+    const monthlyTrends = [];
+    for (let i = 5; i >= 0; i--) {
+        const d = new Date(now.getFullYear(), now.getMonth() - i, 1);
+        const mStart = new Date(d.getFullYear(), d.getMonth(), 1);
+        const mEnd = new Date(d.getFullYear(), d.getMonth() + 1, 0, 23, 59, 59, 999);
+        const mLabel = d.toLocaleString('en-US', { month: 'short' });
+
+        const mTimesheets = employees.flatMap(e => e.timesheets || []).filter(t => {
+            const td = new Date(t.weekStart);
+            return td >= mStart && td <= mEnd;
+        });
+
+        let mPay = mTimesheets.reduce((acc, t) => acc + (t.totalPay || 0), 0);
+        let mHours = mTimesheets.reduce((acc, t) => acc + ((t.totalMinutes || 0) / 60), 0);
+
+        if (i === 0 && mPay === 0) {
+            mPay = totalGross;
+            mHours = totalHours;
+        }
+
+        monthlyTrends.push({
+            month: mLabel,
+            earnings: Math.round(mPay * 100) / 100,
+            hours: Math.round(mHours * 10) / 10
+        });
+    }
+
     return {
         totalPayroll: Math.round(totalGross * 100) / 100,
         approvedPayroll: Math.round(approvedGross * 100) / 100,
@@ -123,6 +151,7 @@ const getPayrollSummary = async (organizationId, params = {}) => {
         staffCount: employees.length,
         trend: 5.2,
         avgRateTrend: 1.2,
+        monthlyTrends
     };
 };
 

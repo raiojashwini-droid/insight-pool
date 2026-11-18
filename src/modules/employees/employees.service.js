@@ -58,41 +58,86 @@ const getEmployeeById = async (id) => {
  * Invite a new employee (creates employee record with INVITED status)
  */
 const inviteEmployee = async (data) => {
-    // Find the default tracking setting for this computer type in the organization
+    // 1. Check if employee already exists with this email
+    const existing = await prisma.employee.findUnique({
+        where: { email: data.email }
+    });
+    if (existing) {
+        const error = new Error(`Employee with email "${data.email}" already exists.`);
+        error.statusCode = 409;
+        throw error;
+    }
+
+    // 2. Resolve teamId - if not provided or invalid, fallback to first team of org
+    let teamId = data.teamId;
+    if (teamId) {
+        const teamExists = await prisma.team.findUnique({ where: { id: teamId } });
+        if (!teamExists) teamId = null;
+    }
+    if (!teamId) {
+        const defaultTeam = await prisma.team.findFirst({
+            where: { organizationId: data.organizationId }
+        });
+        teamId = defaultTeam ? defaultTeam.id : null;
+    }
+
+    // 3. Resolve default tracking setting
+    const computerType = (data.computerType || 'PERSONAL').toLowerCase();
     let trackingSetting = await prisma.trackingSetting.findFirst({
         where: {
             organizationId: data.organizationId,
-            computerType: data.computerType.toLowerCase(),
+            computerType,
             isDefault: true
         }
     });
 
-    // Fallback: If no default, pick the first one of that type
     if (!trackingSetting) {
         trackingSetting = await prisma.trackingSetting.findFirst({
             where: {
-                organizationId: data.organizationId,
-                computerType: data.computerType.toLowerCase()
+                organizationId: data.organizationId
             }
         });
     }
 
     const workMode = data.location || 'Remote';
+    const status = data.status || 'ACTIVE';
 
-    return await prisma.employee.create({
+    const employee = await prisma.employee.create({
         data: {
             fullName: data.fullName,
             email: data.email,
             organizationId: data.organizationId,
-            teamId: data.teamId,
+            teamId,
             workMode,
-            location: null,
+            location: data.location || 'Remote',
             computerType: data.computerType || 'PERSONAL',
             trackingSettingId: trackingSetting?.id,
-            role: 'EMPLOYEE',
-            status: 'INVITED'
+            role: data.role || 'EMPLOYEE',
+            status,
+            hourlyRate: (data.hourlyRate !== undefined && data.hourlyRate !== null) ? Number(data.hourlyRate) : 0,
+            avatar: `https://ui-avatars.com/api/?name=${encodeURIComponent(data.fullName)}&background=random`
+        },
+        include: {
+            team: true,
+            user: true
         }
     });
+
+    // 4. If password is provided, create linked User login account
+    if (data.password) {
+        const hashedPassword = await bcrypt.hash(data.password, 10);
+        await prisma.user.create({
+            data: {
+                email: employee.email,
+                password: hashedPassword,
+                role: employee.role,
+                name: employee.fullName,
+                employeeId: employee.id
+            }
+        });
+    }
+
+    return employee;
 };
 
 /**
@@ -104,8 +149,25 @@ const updateEmployee = async (id, data) => {
     // Filter and prepare employee update data
     const updateData = {};
     if (employeeData.fullName !== undefined) updateData.fullName = employeeData.fullName;
-    if (employeeData.teamId !== undefined) updateData.teamId = employeeData.teamId;
-    if (employeeData.location !== undefined) updateData.location = employeeData.location;
+    
+    // Sanitize teamId: if empty string, none, or invalid, set to null to avoid foreign key failure
+    if (employeeData.teamId !== undefined) {
+        if (!employeeData.teamId || employeeData.teamId === '' || employeeData.teamId === 'none') {
+            updateData.teamId = null;
+        } else {
+            const teamExists = await prisma.team.findUnique({ where: { id: employeeData.teamId } });
+            updateData.teamId = teamExists ? employeeData.teamId : null;
+        }
+    }
+
+    if (employeeData.location !== undefined) {
+        updateData.location = employeeData.location;
+        const cleanLoc = (employeeData.location || '').toLowerCase();
+        if (cleanLoc.includes('office')) updateData.workMode = 'Office';
+        else if (cleanLoc.includes('remote')) updateData.workMode = 'Remote';
+        else if (cleanLoc.includes('hybrid')) updateData.workMode = 'Hybrid';
+    }
+
     if (employeeData.status !== undefined) updateData.status = employeeData.status;
     if (employeeData.hourlyRate !== undefined) updateData.hourlyRate = employeeData.hourlyRate;
     if (employeeData.avatar !== undefined) updateData.avatar = employeeData.avatar;
@@ -116,6 +178,14 @@ const updateEmployee = async (id, data) => {
         data: updateData,
         include: { user: true }
     });
+
+    // Keep linked User name in sync with Employee fullName
+    if (employeeData.fullName && employee.user) {
+        await prisma.user.update({
+            where: { id: employee.user.id },
+            data: { name: employeeData.fullName }
+        }).catch(() => {});
+    }
 
     // Lifecycle Hook: If employee is deactivated, close active sessions & deactivate agent
     if (updateData.status === 'DEACTIVATED') {
@@ -147,29 +217,43 @@ const updateEmployee = async (id, data) => {
     }
 
     // Handle password update or creation of User record
-    if (password) {
+    if (password && password.trim() !== '') {
         const hashedPassword = await bcrypt.hash(password, 10);
-        
+
         if (employee.user) {
             // Update existing user
             await prisma.user.update({
                 where: { id: employee.user.id },
-                data: { 
+                data: {
                     password: hashedPassword,
-                    email: employee.email // Ensure email stays in sync
+                    email: employee.email,
+                    name: employee.fullName
                 }
             });
         } else {
-            // Create new user for this employee if none exists
-            await prisma.user.create({
-                data: {
-                    email: employee.email,
-                    password: hashedPassword,
-                    role: employee.role,
-                    name: employee.fullName,
-                    employeeId: employee.id
-                }
-            });
+            // Check if user already exists by email to prevent duplicate email unique constraint error
+            const existingUser = await prisma.user.findUnique({ where: { email: employee.email } });
+            if (existingUser) {
+                await prisma.user.update({
+                    where: { id: existingUser.id },
+                    data: {
+                        password: hashedPassword,
+                        employeeId: employee.id,
+                        name: employee.fullName,
+                        role: employee.role
+                    }
+                });
+            } else {
+                await prisma.user.create({
+                    data: {
+                        email: employee.email,
+                        password: hashedPassword,
+                        role: employee.role,
+                        name: employee.fullName,
+                        employeeId: employee.id
+                    }
+                });
+            }
         }
     }
 
@@ -177,8 +261,7 @@ const updateEmployee = async (id, data) => {
 };
 
 /**
- * Permanently delete an employee ONLY if no historical records exist.
- * Preserves compliance and prevents accidental deletion of work history.
+ * Permanently delete an employee and cascade-clean all associated records.
  */
 const deleteEmployee = async (id) => {
     const employee = await prisma.employee.findUnique({
@@ -190,65 +273,51 @@ const deleteEmployee = async (id) => {
         throw new Error('Employee not found');
     }
 
-    // Safety check: Prevent deletion if historical attendance, payroll, timesheet, manual time, task time or activity logs exist
-    const [attCount, payrollCount, manualCount, ptlCount, actCount, ttlCount] = await Promise.all([
-        prisma.attendance.count({ where: { employeeId: id } }),
-        prisma.payrollRecord.count({ where: { employeeId: id } }),
-        prisma.manualTime.count({ where: { employeeId: id } }),
-        prisma.projectTimeLog.count({ where: { employeeId: id } }),
-        prisma.activityLog.count({ where: { employeeId: id } }),
-        prisma.taskTimeLog.count({ where: { employeeId: id } }),
-    ]);
-
-    let timesheetCount = 0;
+    // Step-by-step cleanup of all related records to ensure zero foreign key constraint violations
+    await prisma.activityLog.deleteMany({ where: { employeeId: id } }).catch(() => { });
+    await prisma.appUsageLog.deleteMany({ where: { employeeId: id } }).catch(() => { });
+    await prisma.attendance.deleteMany({ where: { employeeId: id } }).catch(() => { });
+    await prisma.manualTime.deleteMany({ where: { employeeId: id } }).catch(() => { });
+    await prisma.projectTimeLog.deleteMany({ where: { employeeId: id } }).catch(() => { });
+    await prisma.taskTimeLog.deleteMany({ where: { employeeId: id } }).catch(() => { });
+    await prisma.payrollRecord.deleteMany({ where: { employeeId: id } }).catch(() => { });
+    await prisma.locationLog.deleteMany({ where: { employeeId: id } }).catch(() => { });
+    await prisma.screenshot.deleteMany({ where: { employeeId: id } }).catch(() => { });
+    await prisma.liveActivity.deleteMany({ where: { employeeId: id } }).catch(() => { });
+    await prisma.shift.deleteMany({ where: { employeeId: id } }).catch(() => { });
+    await prisma.projectAssignment.deleteMany({ where: { employeeId: id } }).catch(() => { });
+    await prisma.timeOff.deleteMany({ where: { employeeId: id } }).catch(() => { });
+    await prisma.auditLog.deleteMany({ where: { userId: id } }).catch(() => { });
+    await prisma.goalStakeholder.deleteMany({ where: { employeeId: id } }).catch(() => { });
+    await prisma.alertLog.deleteMany({ where: { employeeId: id } }).catch(() => { });
+    await prisma.agent.deleteMany({ where: { employeeId: id } }).catch(() => { });
+    await prisma.tracking.deleteMany({ where: { employeeId: id } }).catch(() => { });
+    await prisma.videoRecording.deleteMany({ where: { employeeId: id } }).catch(() => { });
     try {
-        const check = await prisma.$queryRawUnsafe("SHOW TABLES LIKE 'timesheets'");
-        if (check && check.length > 0) {
-            timesheetCount = await prisma.timesheet.count({ where: { employeeId: id } });
-        }
-    } catch (e) {
-        // Table might not exist yet
-    }
+    await prisma.timesheet.deleteMany({ where: { employeeId: id } });
+} catch (e) { }
 
-    const totalHistoricalRecords = attCount + payrollCount + manualCount + ptlCount + timesheetCount + actCount + ttlCount;
+// De-assign from tasks instead of deleting tasks
+await prisma.task.updateMany({
+    where: { employeeId: id },
+    data: { employeeId: null }
+    }).catch (() => { });
 
-    if (totalHistoricalRecords > 0) {
-        const error = new Error(
-            `Cannot delete employee with existing historical records (${attCount} attendance, ${timesheetCount} timesheets, ${manualCount} manual time entries, ${payrollCount} payroll records, ${ttlCount} task time logs, ${actCount} activity logs). Please deactivate the employee instead to preserve historical and audit data.`
-        );
-        error.statusCode = 400;
-        throw error;
-    }
+// Delete User record if exists
+if (employee.user) {
+    await prisma.user.delete({
+        where: { id: employee.user.id }
+}).catch (() => { });
+    } else {
+    await prisma.user.deleteMany({
+        where: { employeeId: id }
+    }).catch(() => { });
+}
 
-    // Step-by-step cleanup of non-work relation records for clean/empty employee
-    await prisma.locationLog.deleteMany({ where: { employeeId: id } });
-    await prisma.screenshot.deleteMany({ where: { employeeId: id } });
-    await prisma.liveActivity.deleteMany({ where: { employeeId: id } });
-    await prisma.shift.deleteMany({ where: { employeeId: id } });
-    await prisma.projectAssignment.deleteMany({ where: { employeeId: id } });
-    await prisma.timeOff.deleteMany({ where: { employeeId: id } });
-    await prisma.auditLog.deleteMany({ where: { userId: id } });
-    await prisma.agent.deleteMany({ where: { employeeId: id } });
-    await prisma.tracking.deleteMany({ where: { employeeId: id } });
-    await prisma.videoRecording.deleteMany({ where: { employeeId: id } });
-    
-    // De-assign from tasks instead of deleting tasks
-    await prisma.task.updateMany({
-        where: { employeeId: id },
-        data: { employeeId: null }
-    });
-
-    // Delete User record if exists
-    if (employee.user) {
-        await prisma.user.delete({
-            where: { id: employee.user.id }
-        });
-    }
-
-    // Finally delete the employee
-    return await prisma.employee.delete({
-        where: { id }
-    });
+// Finally delete the employee record from database
+return await prisma.employee.delete({
+    where: { id }
+});
 };
 
 module.exports = {

@@ -1,10 +1,909 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
 datasource db {
   provider = "mysql"
   url      = env("DATABASE_URL")
 }
 
-generator client {
-  provider = "prisma-client-js"
+model User {
+  id         String    @id @default(uuid())
+  email      String    @unique
+  password   String
+  role       Role      @default(EMPLOYEE)
+  name       String?
+  avatar     String?   @db.Text
+  employeeId String?   @unique
+  createdAt  DateTime  @default(now())
+  updatedAt  DateTime  @updatedAt
+  employee   Employee? @relation(fields: [employeeId], references: [id])
+
+  @@map("users")
+}
+
+model Organization {
+  id                      String                   @id @default(uuid())
+  legalName               String
+  workspaceId             String                   @unique @default(uuid())
+  industry                String?
+  organizationSize        String?
+  timeZone                String                   @default("UTC")
+  workStartTime           String                   @default("09:00")
+  workEndTime             String                   @default("18:00")
+  workDays                String                   @default("Monday,Tuesday,Wednesday,Thursday,Friday")
+  createdAt               DateTime                 @default(now())
+  updatedAt               DateTime                 @updatedAt
+  activityLogs            ActivityLog[]
+  advancedTrackingSetting AdvancedTrackingSetting?
+  alertLogs               AlertLog[]
+  alertRules              AlertRule[]
+  alertSettings           AlertSettings?
+  appUsageLogs            AppUsageLog[]
+  attendance              Attendance[]
+  auditLogs               AuditLog[]
+  complianceSetting       ComplianceSetting?
+  emailReports            EmailReport[]
+  employees               Employee[]
+  goals                   Goal[]
+  integrations            Integration[]
+  invoices                Invoice[]
+  liveActivities          LiveActivity[]
+  locationLogs            LocationLog[]
+  locations               Location[]
+  manualTimeEntries       ManualTime[]
+  notifications           Notification[]
+  productivityRules       ProductivityRule[]
+  productivityTags        ProductivityTag[]
+  projects                Project[]
+  reportSetting           ReportSetting?
+  screenshotSetting       ScreenshotSetting?
+  screenshots             Screenshot[]
+  shifts                  Shift[]
+  taskTimeLogs            TaskTimeLog[]
+  tasks                   Task[]
+  teams                   Team[]
+  time_mapping_rules      time_mapping_rules[]
+  timeOffs                TimeOff[]
+  timesheets              Timesheet[]
+  trackingSettings        TrackingSetting[]
+  videoRecordings         VideoRecording[]
+  workZones               WorkZone[]
+
+  @@map("organizations")
+}
+
+model ScreenshotSetting {
+  id             String       @id @default(uuid())
+  organizationId String       @unique
+  randomShifts   Boolean      @default(false)
+  excludeAdmin   Boolean      @default(true)
+  globalBlur     Boolean      @default(false)
+  frequency      Int          @default(5)
+  createdAt      DateTime     @default(now())
+  updatedAt      DateTime     @updatedAt
+  organization   Organization @relation(fields: [organizationId], references: [id])
+
+  @@map("screenshot_settings")
+}
+
+model Team {
+  id                String             @id @default(uuid())
+  name              String
+  description       String?
+  color             String?            @default("bg-blue-500")
+  organizationId    String
+  createdAt         DateTime           @default(now())
+  updatedAt         DateTime           @updatedAt
+  employees         Employee[]
+  productivityRules ProductivityRule[]
+  organization      Organization       @relation(fields: [organizationId], references: [id])
+
+  @@index([organizationId], map: "teams_organizationId_fkey")
+  @@map("teams")
+}
+
+model Employee {
+  id                 String              @id @default(uuid())
+  fullName           String
+  email              String              @unique
+  role               Role                @default(EMPLOYEE)
+  location           String?             @default("Remote")
+  latitude           Float?
+  longitude          Float?
+  computerType       ComputerType        @default(COMPANY)
+  status             EmployeeStatus      @default(ACTIVE)
+  hourlyRate         Float               @default(0)
+  avatar             String?             @db.Text
+  teamId             String?
+  organizationId     String
+  trackingSettingId  String?
+  createdAt          DateTime            @default(now())
+  updatedAt          DateTime            @updatedAt
+  workMode           String?             @default("Remote")
+  payRateType        String              @default("DAILY")
+  activityLogs       ActivityLog[]
+  agent              Agent?
+  alertLogs          AlertLog[]
+  appUsageLogs       AppUsageLog[]
+  attendance         Attendance[]
+  auditLogs          AuditLog[]
+  organization       Organization        @relation(fields: [organizationId], references: [id])
+  team               Team?               @relation(fields: [teamId], references: [id])
+  trackingSetting    TrackingSetting?    @relation(fields: [trackingSettingId], references: [id])
+  goalStakeholders   GoalStakeholder[]
+  liveActivities     LiveActivity[]
+  locationLogs       LocationLog[]
+  manualTimeEntries  ManualTime[]
+  payrollRecords     PayrollRecord[]
+  projectAssignments ProjectAssignment[]
+  projectTimeLogs    ProjectTimeLog[]
+  screenshots        Screenshot[]
+  shifts             Shift[]
+  taskTimeLogs       TaskTimeLog[]
+  tasks              Task[]
+  timeOffs           TimeOff[]
+  timesheets         Timesheet[]
+  tracking           Tracking[]
+  user               User?
+  videoRecordings    VideoRecording[]
+
+  @@index([organizationId], map: "employees_organizationId_fkey")
+  @@index([teamId], map: "employees_teamId_fkey")
+  @@index([trackingSettingId], map: "employees_trackingSettingId_fkey")
+  @@map("employees")
+}
+
+model Project {
+  id                 String               @id @default(uuid())
+  name               String
+  description        String?              @db.Text
+  billableRate       Float                @default(0)
+  budget             Float                @default(0)
+  organizationId     String
+  createdAt          DateTime             @default(now())
+  updatedAt          DateTime             @updatedAt
+  assignments        ProjectAssignment[]
+  timeLogs           ProjectTimeLog[]
+  organization       Organization         @relation(fields: [organizationId], references: [id])
+  tasks              Task[]
+  time_mapping_rules time_mapping_rules[]
+
+  @@index([organizationId], map: "projects_organizationId_fkey")
+  @@map("projects")
+}
+
+model ProjectAssignment {
+  id         String   @id @default(uuid())
+  projectId  String
+  employeeId String
+  createdAt  DateTime @default(now())
+  employee   Employee @relation(fields: [employeeId], references: [id])
+  project    Project  @relation(fields: [projectId], references: [id])
+
+  @@unique([projectId, employeeId])
+  @@index([employeeId], map: "project_assignments_employeeId_fkey")
+  @@map("project_assignments")
+}
+
+model ProjectTimeLog {
+  id          String    @id @default(uuid())
+  projectId   String
+  employeeId  String
+  duration    Int
+  type        String
+  loggedAt    DateTime  @default(now())
+  endTime     DateTime?
+  startTime   DateTime?
+  taskId      String?
+  windowTitle String?   @db.Text
+  tasks       Task?     @relation(fields: [taskId], references: [id])
+  employee    Employee  @relation(fields: [employeeId], references: [id], map: "ptl_employee_id_fkey")
+  project     Project   @relation(fields: [projectId], references: [id], map: "ptl_project_id_fkey")
+
+  @@index([taskId], map: "project_time_logs_taskId_fkey")
+  @@index([employeeId], map: "ptl_employee_id_fkey")
+  @@index([projectId], map: "ptl_project_id_fkey")
+  @@map("project_time_logs")
+}
+
+model Task {
+  id                 String               @id @default(uuid())
+  name               String
+  status             TaskStatus           @default(BACKLOG)
+  priority           TaskPriority         @default(MEDIUM)
+  dueDate            DateTime?
+  projectId          String
+  employeeId         String?
+  organizationId     String
+  createdAt          DateTime             @default(now())
+  updatedAt          DateTime             @updatedAt
+  activityLogs       ActivityLog[]
+  project_time_logs  ProjectTimeLog[]
+  timeLogs           TaskTimeLog[]
+  employee           Employee?            @relation(fields: [employeeId], references: [id])
+  organization       Organization         @relation(fields: [organizationId], references: [id])
+  project            Project              @relation(fields: [projectId], references: [id])
+  time_mapping_rules time_mapping_rules[]
+
+  @@index([employeeId], map: "tasks_employeeId_fkey")
+  @@index([organizationId], map: "tasks_organizationId_fkey")
+  @@index([projectId], map: "tasks_projectId_fkey")
+  @@map("tasks")
+}
+
+model Attendance {
+  id             String       @id @default(uuid())
+  date           DateTime     @db.Date
+  clockIn        DateTime
+  clockOut       DateTime?
+  status         String       @default("PRESENT")
+  late           Boolean      @default(false)
+  duration       Int          @default(0)
+  employeeId     String
+  organizationId String
+  createdAt      DateTime     @default(now())
+  updatedAt      DateTime     @updatedAt
+  employee       Employee     @relation(fields: [employeeId], references: [id])
+  organization   Organization @relation(fields: [organizationId], references: [id])
+
+  @@index([employeeId], map: "attendance_employeeId_fkey")
+  @@index([organizationId], map: "attendance_organizationId_fkey")
+  @@map("attendance")
+}
+
+model ManualTime {
+  id             String       @id @default(uuid())
+  startTime      DateTime
+  endTime        DateTime
+  timezone       String?
+  type           String
+  duration       Int
+  note           String?      @db.Text
+  employeeId     String
+  organizationId String
+  createdAt      DateTime     @default(now())
+  updatedAt      DateTime     @updatedAt
+  employee       Employee     @relation(fields: [employeeId], references: [id])
+  organization   Organization @relation(fields: [organizationId], references: [id])
+
+  @@index([employeeId], map: "manual_time_entries_employeeId_fkey")
+  @@index([organizationId], map: "manual_time_entries_organizationId_fkey")
+  @@map("manual_time_entries")
+}
+
+model Shift {
+  id             String       @id @default(uuid())
+  startTime      String
+  endTime        String
+  date           DateTime     @db.Date
+  employeeId     String
+  organizationId String
+  createdAt      DateTime     @default(now())
+  updatedAt      DateTime     @updatedAt
+  employee       Employee     @relation(fields: [employeeId], references: [id])
+  organization   Organization @relation(fields: [organizationId], references: [id])
+
+  @@index([employeeId], map: "shifts_employeeId_fkey")
+  @@index([organizationId], map: "shifts_organizationId_fkey")
+  @@map("shifts")
+}
+
+model TimeOff {
+  id             String       @id @default(uuid())
+  startDate      DateTime     @db.Date
+  endDate        DateTime     @db.Date
+  type           String
+  timeOffType    String?
+  timezone       String?
+  note           String?      @db.Text
+  singleDay      Boolean      @default(false)
+  employeeId     String
+  organizationId String
+  createdAt      DateTime     @default(now())
+  updatedAt      DateTime     @updatedAt
+  employee       Employee     @relation(fields: [employeeId], references: [id])
+  organization   Organization @relation(fields: [organizationId], references: [id])
+
+  @@index([employeeId], map: "time_offs_employeeId_fkey")
+  @@index([organizationId], map: "time_offs_organizationId_fkey")
+  @@map("time_offs")
+}
+
+model ActivityLog {
+  id             String           @id @default(uuid())
+  activityType   ActivityType     @default(ACTIVE)
+  productivity   ProductivityType @default(NEUTRAL)
+  duration       Int              @default(0)
+  timestamp      DateTime         @default(now())
+  appWebsite     String?          @default("Unknown")
+  employeeId     String
+  taskId         String?
+  organizationId String
+  createdAt      DateTime         @default(now())
+  updatedAt      DateTime         @updatedAt
+  employee       Employee         @relation(fields: [employeeId], references: [id])
+  organization   Organization     @relation(fields: [organizationId], references: [id])
+  task           Task?            @relation(fields: [taskId], references: [id])
+
+  @@index([employeeId], map: "activity_logs_employeeId_fkey")
+  @@index([organizationId], map: "activity_logs_organizationId_fkey")
+  @@index([taskId], map: "activity_logs_taskId_fkey")
+  @@map("activity_logs")
+}
+
+model LocationLog {
+  id             String       @id @default(uuid())
+  employeeId     String
+  organizationId String
+  latitude       Float
+  longitude      Float
+  accuracy       Float?
+  source         String       @default("GPS")
+  createdAt      DateTime     @default(now())
+  employee       Employee     @relation(fields: [employeeId], references: [id])
+  organization   Organization @relation(fields: [organizationId], references: [id])
+
+  @@index([employeeId], map: "location_logs_employeeId_fkey")
+  @@index([organizationId], map: "location_logs_organizationId_fkey")
+  @@map("location_logs")
+}
+
+model WorkZone {
+  id             String       @id @default(uuid())
+  organizationId String
+  name           String
+  type           String       @default("Office")
+  latitude       Float
+  longitude      Float
+  radius         Float        @default(100)
+  createdAt      DateTime     @default(now())
+  organization   Organization @relation(fields: [organizationId], references: [id])
+
+  @@index([organizationId], map: "work_zones_organizationId_fkey")
+  @@map("work_zones")
+}
+
+model Location {
+  id             String       @id @default(uuid())
+  organizationId String
+  name           String
+  type           String       @default("Office")
+  address        String?
+  latitude       Float?
+  longitude      Float?
+  threshold      Int          @default(4)
+  createdAt      DateTime     @default(now())
+  organization   Organization @relation(fields: [organizationId], references: [id])
+
+  @@index([organizationId], map: "locations_organizationId_fkey")
+  @@map("locations")
+}
+
+model ReportSetting {
+  id                  String       @id @default(uuid())
+  organizationId      String       @unique
+  workloadOptimalFrom Int          @default(60)
+  workloadOptimalTo   Int          @default(85)
+  createdAt           DateTime     @default(now())
+  updatedAt           DateTime     @updatedAt
+  organization        Organization @relation(fields: [organizationId], references: [id])
+
+  @@map("report_settings")
+}
+
+model PayrollRecord {
+  id         String        @id @default(uuid())
+  totalHours Float         @default(0)
+  amount     Float         @default(0)
+  status     PayrollStatus @default(UNPAID)
+  employeeId String
+  createdAt  DateTime      @default(now())
+  updatedAt  DateTime      @updatedAt
+  employee   Employee      @relation(fields: [employeeId], references: [id])
+
+  @@index([employeeId], map: "payroll_records_employeeId_fkey")
+  @@map("payroll_records")
+}
+
+model ComplianceSetting {
+  id                      String       @id @default(uuid())
+  organizationId          String       @unique
+  gdprEnabled             Boolean      @default(true)
+  activityMonitoring      Boolean      @default(true)
+  locationTracking        Boolean      @default(true)
+  showUrlsInActivityLogs  Boolean      @default(false)
+  blurLevel               Int          @default(2)
+  saveOriginalScreenshots Boolean      @default(false)
+  collectPHI              Boolean?
+  twoFactorEnabled        Boolean      @default(false)
+  encryptionEnabled       Boolean      @default(false)
+  consentPercentage       Float        @default(0)
+  retentionPeriod         Int          @default(30)
+  createdAt               DateTime     @default(now())
+  updatedAt               DateTime     @updatedAt
+  organization            Organization @relation(fields: [organizationId], references: [id])
+
+  @@map("compliance_settings")
+}
+
+model AuditLog {
+  id             String       @id @default(uuid())
+  organizationId String
+  userId         String
+  action         String
+  status         String
+  ipAddress      String?
+  metadata       String?      @db.LongText
+  createdAt      DateTime     @default(now())
+  organization   Organization @relation(fields: [organizationId], references: [id])
+  user           Employee     @relation(fields: [userId], references: [id])
+
+  @@index([organizationId], map: "audit_logs_organizationId_fkey")
+  @@index([userId], map: "audit_logs_userId_fkey")
+  @@map("audit_logs")
+}
+
+model Screenshot {
+  id                String           @id @default(uuid())
+  imageUrl          String           @db.LongText
+  productivity      ProductivityType @default(NEUTRAL)
+  blurred           Boolean          @default(false)
+  deletedByEmployee Boolean          @default(false)
+  capturedAt        DateTime         @default(now())
+  employeeId        String
+  organizationId    String
+  createdAt         DateTime         @default(now())
+  updatedAt         DateTime         @updatedAt
+  employee          Employee         @relation(fields: [employeeId], references: [id])
+  organization      Organization     @relation(fields: [organizationId], references: [id])
+
+  @@index([employeeId], map: "screenshots_employeeId_fkey")
+  @@index([organizationId], map: "screenshots_organizationId_fkey")
+  @@map("screenshots")
+}
+
+model AppUsageLog {
+  id             String           @id @default(uuid())
+  appName        String
+  domain         String           @default("")
+  category       String           @default("Uncategorized")
+  productivity   ProductivityType @default(NEUTRAL)
+  duration       Int              @default(0)
+  timestamp      DateTime         @default(now())
+  employeeId     String
+  organizationId String
+  createdAt      DateTime         @default(now())
+  employee       Employee         @relation(fields: [employeeId], references: [id])
+  organization   Organization     @relation(fields: [organizationId], references: [id])
+
+  @@index([employeeId], map: "app_usage_logs_employeeId_fkey")
+  @@index([organizationId], map: "app_usage_logs_organizationId_fkey")
+  @@map("app_usage_logs")
+}
+
+model Invoice {
+  id             String        @id @default(uuid())
+  invoiceNumber  String        @unique
+  clientName     String
+  clientEmail    String?
+  amount         Float
+  currency       String        @default("USD")
+  issueDate      DateTime      @default(now())
+  dueDate        DateTime
+  status         InvoiceStatus @default(DRAFT)
+  notes          String?       @db.Text
+  organizationId String
+  createdAt      DateTime      @default(now())
+  updatedAt      DateTime      @updatedAt
+  organization   Organization  @relation(fields: [organizationId], references: [id])
+
+  @@index([organizationId], map: "invoices_organizationId_fkey")
+  @@map("invoices")
+}
+
+model LiveActivity {
+  id             String       @id @default(uuid())
+  employeeId     String
+  organizationId String
+  activeApp      String
+  activeWindow   String
+  keystrokes     Int
+  mouseClicks    Int
+  idleTime       Int
+  createdAt      DateTime     @default(now())
+  employee       Employee     @relation(fields: [employeeId], references: [id])
+  organization   Organization @relation(fields: [organizationId], references: [id])
+
+  @@index([employeeId], map: "live_activities_employeeId_fkey")
+  @@index([organizationId], map: "live_activities_organizationId_fkey")
+  @@map("live_activities")
+}
+
+model InvitationToken {
+  id             String   @id @default(uuid())
+  email          String
+  token          String   @unique
+  organizationId String
+  role           String
+  expiresAt      DateTime
+  createdAt      DateTime @default(now())
+
+  @@map("invitation_tokens")
+}
+
+model AlertRule {
+  id             String       @id @default(uuid())
+  name           String
+  type           String
+  trigger        String
+  scope          String       @default("All Employees")
+  organizationId String
+  createdAt      DateTime     @default(now())
+  updatedAt      DateTime     @updatedAt
+  organization   Organization @relation(fields: [organizationId], references: [id])
+
+  @@index([organizationId], map: "alert_rules_organizationId_fkey")
+  @@map("alert_rules")
+}
+
+model AlertSettings {
+  id                     String       @id @default(uuid())
+  organizationId         String       @unique
+  earliestClockIn        Int          @default(15)
+  latestClockOut         Int          @default(30)
+  tolerance              Int          @default(10)
+  absentInApp            Boolean      @default(true)
+  absentEmail            Boolean      @default(false)
+  headcountEnabled       Boolean      @default(true)
+  headcountLateThreshold Int          @default(15)
+  headcountSendAfter     String       @default("scheduled_time")
+  headcountInApp         Boolean      @default(true)
+  headcountEmail         Boolean      @default(false)
+  productivityLabeling   String       @default("daily")
+  manualTimeEntries      String       @default("daily")
+  createdAt              DateTime     @default(now())
+  updatedAt              DateTime     @updatedAt
+  organization           Organization @relation(fields: [organizationId], references: [id])
+
+  @@map("alert_settings")
+}
+
+model EmailReport {
+  id             String       @id @default(uuid())
+  title          String
+  frequency      String
+  recipients     String       @db.LongText
+  sendToSelf     Boolean      @default(true)
+  content        String       @db.LongText
+  isActive       Boolean      @default(true)
+  organizationId String
+  createdAt      DateTime     @default(now())
+  updatedAt      DateTime     @updatedAt
+  organization   Organization @relation(fields: [organizationId], references: [id])
+
+  @@index([organizationId], map: "email_reports_organizationId_fkey")
+  @@map("email_reports")
+}
+
+model Integration {
+  id             String       @id @default(uuid())
+  integrationId  String
+  connected      Boolean      @default(false)
+  config         String       @db.LongText
+  organizationId String
+  createdAt      DateTime     @default(now())
+  updatedAt      DateTime     @updatedAt
+  organization   Organization @relation(fields: [organizationId], references: [id])
+
+  @@unique([organizationId, integrationId])
+  @@map("integrations")
+}
+
+model ProductivityTag {
+  id             String             @id @default(uuid())
+  name           String
+  color          String
+  organizationId String
+  createdAt      DateTime           @default(now())
+  updatedAt      DateTime           @updatedAt
+  rules          ProductivityRule[]
+  organization   Organization       @relation(fields: [organizationId], references: [id])
+
+  @@index([organizationId], map: "productivity_tags_organizationId_fkey")
+  @@map("productivity_tags")
+}
+
+model ProductivityRule {
+  id             String           @id @default(uuid())
+  appName        String?
+  domain         String
+  productivity   ProductivityType @default(NEUTRAL)
+  category       String?          @default("Uncategorized")
+  tagId          String?
+  organizationId String
+  createdAt      DateTime         @default(now())
+  updatedAt      DateTime         @updatedAt
+  isBlocked      Boolean          @default(false)
+  teamId         String?
+  organization   Organization     @relation(fields: [organizationId], references: [id])
+  tag            ProductivityTag? @relation(fields: [tagId], references: [id])
+  team           Team?            @relation(fields: [teamId], references: [id])
+
+  @@unique([organizationId, domain, teamId])
+  @@unique([organizationId, domain, teamId], map: "productivity_rules_org_domain_team_idx")
+  @@index([tagId], map: "productivity_rules_tagId_fkey")
+  @@index([teamId], map: "productivity_rules_teamId_fkey")
+  @@map("productivity_rules")
+}
+
+model TrackingSetting {
+  id                     String       @id @default(uuid())
+  title                  String
+  computerType           String
+  isDefault              Boolean      @default(false)
+  visibility             String       @default("visible")
+  screenshotsPerHour     Int          @default(0)
+  allowAccessScreenshots Boolean      @default(false)
+  allowRemoveScreenshots Boolean      @default(false)
+  breakTime              Int          @default(0)
+  allowOverBreak         Boolean      @default(false)
+  allowNewBreaks         Boolean      @default(false)
+  idleTime               Int          @default(2)
+  trackingScenario       String       @default("unlimited")
+  workingDays            String       @db.LongText
+  trackTasks             Boolean      @default(false)
+  allowAddTasks          Boolean      @default(false)
+  permissions            String       @db.LongText
+  organizationId         String
+  createdAt              DateTime     @default(now())
+  updatedAt              DateTime     @updatedAt
+  employees              Employee[]
+  organization           Organization @relation(fields: [organizationId], references: [id])
+
+  @@index([organizationId], map: "tracking_settings_organizationId_fkey")
+  @@map("tracking_settings")
+}
+
+model AdvancedTrackingSetting {
+  id                 String       @id @default(uuid())
+  shiftThreshold     Int          @default(4)
+  strictTime         Boolean      @default(false)
+  inactivityPopups   Boolean      @default(true)
+  identificationMode String       @default("hwid")
+  showEngagement     Boolean      @default(false)
+  useActiveDirectory Boolean      @default(true)
+  adEmail            Boolean      @default(true)
+  adTeam             Boolean      @default(true)
+  adTrackingSettings Boolean      @default(false)
+  organizationId     String       @unique
+  createdAt          DateTime     @default(now())
+  updatedAt          DateTime     @updatedAt
+  organization       Organization @relation(fields: [organizationId], references: [id])
+
+  @@map("advanced_tracking_settings")
+}
+
+model Goal {
+  id             String            @id @default(uuid())
+  title          String
+  sub            String
+  targetDate     String
+  progress       Int               @default(0)
+  status         String            @default("ACTIVE")
+  color          String?           @default("text-indigo-600 bg-indigo-50")
+  organizationId String
+  createdAt      DateTime          @default(now())
+  updatedAt      DateTime          @updatedAt
+  activities     GoalActivity[]
+  stakeholders   GoalStakeholder[]
+  organization   Organization      @relation(fields: [organizationId], references: [id])
+
+  @@index([organizationId], map: "goals_organizationId_fkey")
+  @@map("goals")
+}
+
+model GoalStakeholder {
+  id         String   @id @default(uuid())
+  goalId     String
+  employeeId String
+  createdAt  DateTime @default(now())
+  employee   Employee @relation(fields: [employeeId], references: [id], onDelete: Cascade)
+  goal       Goal     @relation(fields: [goalId], references: [id], onDelete: Cascade)
+
+  @@unique([goalId, employeeId])
+  @@index([employeeId], map: "goal_stakeholders_employeeId_fkey")
+  @@map("goal_stakeholders")
+}
+
+model GoalActivity {
+  id           String   @id @default(uuid())
+  goalId       String
+  title        String
+  status       String
+  type         String
+  activityDate DateTime @default(now())
+  createdAt    DateTime @default(now())
+  goal         Goal     @relation(fields: [goalId], references: [id], onDelete: Cascade)
+
+  @@index([goalId], map: "goal_activities_goalId_fkey")
+  @@map("goal_activities")
+}
+
+model Agent {
+  id         String   @id @default(uuid())
+  employeeId String   @unique
+  deviceId   String   @unique
+  status     String   @default("inactive")
+  systemInfo String?  @db.LongText
+  lastSeen   DateTime @default(now())
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+  employee   Employee @relation(fields: [employeeId], references: [id])
+
+  @@map("agents")
+}
+
+model Tracking {
+  id             String   @id @default(uuid())
+  employeeId     String
+  screenshotUrl  String?  @db.LongText
+  videoUrl       String?  @db.LongText
+  activityStatus String?
+  location       String?
+  source         String   @default("AGENT")
+  timestamp      DateTime @default(now())
+  createdAt      DateTime @default(now())
+  employee       Employee @relation(fields: [employeeId], references: [id])
+
+  @@index([employeeId], map: "tracking_data_employeeId_fkey")
+  @@map("tracking_data")
+}
+
+model VideoRecording {
+  id             String       @id @default(uuid())
+  employeeId     String
+  organizationId String
+  fileUrl        String       @db.LongText
+  sizeMb         Float?
+  createdAt      DateTime     @default(now())
+  employee       Employee     @relation(fields: [employeeId], references: [id])
+  organization   Organization @relation(fields: [organizationId], references: [id])
+
+  @@index([employeeId], map: "video_recordings_employeeId_fkey")
+  @@index([organizationId], map: "video_recordings_organizationId_fkey")
+  @@map("video_recordings")
+}
+
+model Timesheet {
+  id              String              @id @default(uuid())
+  organizationId  String
+  employeeId      String
+  weekStart       String
+  status          TimesheetStatus     @default(DRAFT)
+  submittedAt     DateTime?
+  totalMinutes    Int                 @default(0)
+  regularMinutes  Int                 @default(0)
+  overtimeMinutes Int                 @default(0)
+  totalPay        Float               @default(0)
+  createdAt       DateTime            @default(now())
+  updatedAt       DateTime            @default(now()) @updatedAt
+  approvals       TimesheetApproval[]
+  employee        Employee            @relation(fields: [employeeId], references: [id], onDelete: Cascade)
+  organization    Organization        @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  @@unique([organizationId, employeeId, weekStart])
+  @@index([organizationId, weekStart])
+  @@index([employeeId, weekStart])
+  @@map("timesheets")
+}
+
+model TimesheetApproval {
+  id           String    @id @default(uuid())
+  timesheetId  String
+  approverId   String
+  approverName String
+  decision     String
+  comment      String?   @db.Text
+  createdAt    DateTime  @default(now())
+  timesheet    Timesheet @relation(fields: [timesheetId], references: [id], onDelete: Cascade)
+
+  @@index([timesheetId])
+  @@map("timesheet_approvals")
+}
+
+model TaskTimeLog {
+  id             String       @id @default(uuid())
+  taskId         String
+  employeeId     String
+  organizationId String
+  startTime      DateTime
+  endTime        DateTime?
+  duration       Int          @default(0)
+  isRunning      Boolean      @default(true)
+  source         String       @default("WEB")
+  createdAt      DateTime     @default(now())
+  updatedAt      DateTime     @default(now()) @updatedAt
+  employee       Employee     @relation(fields: [employeeId], references: [id], onDelete: Cascade)
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  task           Task         @relation(fields: [taskId], references: [id], onDelete: Cascade)
+
+  @@index([employeeId, isRunning])
+  @@index([taskId])
+  @@index([organizationId])
+  @@map("task_time_logs")
+}
+
+model AlertLog {
+  id             String       @id @default(uuid())
+  organizationId String
+  employeeId     String
+  ruleType       String
+  trigger        String
+  severity       String       @default("warning")
+  message        String       @db.Text
+  screenshotUrl  String?      @db.LongText
+  metadata       String?      @db.LongText
+  resolved       Boolean      @default(false)
+  createdAt      DateTime     @default(now())
+  updatedAt      DateTime     @default(now()) @updatedAt
+  employee       Employee     @relation(fields: [employeeId], references: [id], onDelete: Cascade)
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  @@index([organizationId, createdAt])
+  @@index([employeeId, createdAt])
+  @@map("alert_logs")
+}
+
+model Notification {
+  id             String       @id @default(uuid())
+  organizationId String
+  targetUserId   String?
+  title          String
+  description    String?      @db.Text
+  type           String       @default("info")
+  unread         Boolean      @default(true)
+  link           String?
+  metadata       String?      @db.LongText
+  createdAt      DateTime     @default(now())
+  updatedAt      DateTime     @default(now()) @updatedAt
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  @@index([organizationId, unread, createdAt])
+  @@map("notifications")
+}
+
+model task_status_history {
+  id              String   @id
+  taskId          String
+  organizationId  String
+  fromStatus      String?
+  toStatus        String
+  changedAt       DateTime @default(now())
+  durationSeconds Int      @default(0)
+
+  @@index([organizationId])
+  @@index([taskId])
+}
+
+model time_mapping_rules {
+  id             String       @id
+  name           String
+  pattern        String
+  projectId      String
+  taskId         String?
+  priority       Int          @default(0)
+  isActive       Boolean      @default(true)
+  organizationId String
+  createdAt      DateTime     @default(now())
+  updatedAt      DateTime
+  organizations  Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  projects       Project      @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  tasks          Task?        @relation(fields: [taskId], references: [id])
+
+  @@index([organizationId], map: "time_mapping_rules_organizationId_fkey")
+  @@index([projectId], map: "time_mapping_rules_projectId_fkey")
+  @@index([taskId], map: "time_mapping_rules_taskId_fkey")
 }
 
 enum Role {
@@ -55,21 +954,6 @@ enum InvoiceStatus {
   CANCELLED
 }
 
-model User {
-  id         String    @id @default(uuid())
-  email      String    @unique
-  password   String
-  role       Role      @default(EMPLOYEE)
-  name       String?
-  avatar     String?   @db.Text
-  employee   Employee? @relation(fields: [employeeId], references: [id])
-  employeeId String?   @unique
-  createdAt  DateTime  @default(now())
-  updatedAt  DateTime  @updatedAt
-
-  @@map("users")
-}
-
 enum ComputerType {
   COMPANY
   PERSONAL
@@ -85,812 +969,9 @@ enum EmployeeStatus {
   MERGED
 }
 
-model Organization {
-  id               String            @id @default(uuid())
-  legalName        String
-  workspaceId      String            @unique @default(uuid())
-  industry         String?
-  organizationSize String?
-  timeZone         String            @default("UTC")
-  workStartTime    String            @default("09:00")
-  workEndTime      String            @default("18:00")
-  workDays         String            @default("Monday,Tuesday,Wednesday,Thursday,Friday")
-  teams            Team[]
-  employees        Employee[]
-  projects         Project[]
-  tasks            Task[]
-  activityLogs     ActivityLog[]
-  screenshots      Screenshot[]
-  appUsageLogs     AppUsageLog[]
-  attendance       Attendance[]
-  manualTimeEntries ManualTime[]
-  shifts           Shift[]
-  timeOffs         TimeOff[]
-  complianceSetting ComplianceSetting?
-  reportSetting    ReportSetting?
-  locations        Location[]
-  workZones        WorkZone[]
-  locationLogs     LocationLog[]
-  invoices         Invoice[]
-  liveActivities   LiveActivity[]
-  auditLogs        AuditLog[]
-  alertRules       AlertRule[]
-  alertSettings    AlertSettings?
-  emailReports     EmailReport[]
-  integrations     Integration[]
-  productivityTags  ProductivityTag[]
-  productivityRules ProductivityRule[]
-  trackingSettings  TrackingSetting[]
-  advancedTrackingSetting AdvancedTrackingSetting?
-  goals            Goal[]
-  screenshotSetting ScreenshotSetting?
-  videoRecordings  VideoRecording[]
-  timesheets       Timesheet[]
-  taskTimeLogs     TaskTimeLog[]
-  notifications    Notification[]
-  alertLogs        AlertLog[]
-  createdAt        DateTime          @default(now())
-  updatedAt        DateTime          @updatedAt
-
-  @@map("organizations")
-}
-
-model ScreenshotSetting {
-  id             String       @id @default(uuid())
-  organization   Organization @relation(fields: [organizationId], references: [id])
-  organizationId String       @unique
-  randomShifts   Boolean      @default(false)
-  excludeAdmin   Boolean      @default(true)
-  globalBlur     Boolean      @default(false)
-  frequency      Int          @default(5) // In minutes
-  createdAt      DateTime     @default(now())
-  updatedAt      DateTime     @updatedAt
-
-  @@map("screenshot_settings")
-}
-
-model Team {
-  id             String       @id @default(uuid())
-  name           String
-  description    String?
-  color          String?      @default("bg-blue-500")
-  organization   Organization @relation(fields: [organizationId], references: [id])
-  organizationId String
-  employees      Employee[]
-  productivityRules ProductivityRule[]
-  createdAt      DateTime     @default(now())
-  updatedAt      DateTime     @updatedAt
-
-  @@map("teams")
-}
-
-model Employee {
-  id             String         @id @default(uuid())
-  fullName       String
-  email          String         @unique
-  role           Role           @default(EMPLOYEE)
-  location       String?        @default("Remote")
-  workMode       String?        @default("Remote")
-  latitude       Float?
-  longitude      Float?
-  computerType   ComputerType   @default(COMPANY)
-  status         EmployeeStatus @default(ACTIVE)
-  hourlyRate     Float          @default(0.0)
-  payRateType    String?        @default("HOURLY")
-  avatar         String?        @db.Text
-  user           User?
-  team           Team?          @relation(fields: [teamId], references: [id])
-  teamId         String?
-  organization   Organization   @relation(fields: [organizationId], references: [id])
-  organizationId String
-  trackingSetting TrackingSetting? @relation(fields: [trackingSettingId], references: [id])
-  trackingSettingId String?
-  tasks          Task[]
-  attendance     Attendance[]
-  activityLogs   ActivityLog[]
-  locationLogs   LocationLog[]
-  payrollRecords PayrollRecord[]
-  screenshots    Screenshot[]
-  liveActivities LiveActivity[]
-  appUsageLogs   AppUsageLog[]
-  manualTimeEntries ManualTime[]
-  shifts         Shift[]
-  timeOffs       TimeOff[]
-  projectAssignments ProjectAssignment[]
-  projectTimeLogs    ProjectTimeLog[]
-  auditLogs          AuditLog[]
-  goalStakeholders   GoalStakeholder[]
-  agent              Agent?
-  tracking           Tracking[]
-  videoRecordings    VideoRecording[]
-  timesheets         Timesheet[]
-  taskTimeLogs       TaskTimeLog[]
-  alertLogs          AlertLog[]
-  createdAt      DateTime       @default(now())
-  updatedAt      DateTime       @updatedAt
-
-  @@map("employees")
-}
-
-model Project {
-  id             String              @id @default(uuid())
-  name           String
-  description    String?             @db.Text
-  billableRate   Float               @default(0.0)
-  budget         Float               @default(0.0)
-  organization   Organization        @relation(fields: [organizationId], references: [id])
-  organizationId String
-  assignments    ProjectAssignment[]
-  timeLogs       ProjectTimeLog[]
-  tasks          Task[]
-  createdAt      DateTime            @default(now())
-  updatedAt      DateTime            @updatedAt
-
-  @@map("projects")
-}
-
-model ProjectAssignment {
-  id         String   @id @default(uuid())
-  project    Project  @relation(fields: [projectId], references: [id])
-  projectId  String
-  employee   Employee @relation(fields: [employeeId], references: [id])
-  employeeId String
-  createdAt  DateTime @default(now())
-
-  @@unique([projectId, employeeId])
-  @@map("project_assignments")
-}
-
-model ProjectTimeLog {
-  id         String   @id @default(uuid())
-  project    Project  @relation(fields: [projectId], references: [id], map: "ptl_project_id_fkey")
-  projectId  String
-  employee   Employee @relation(fields: [employeeId], references: [id], map: "ptl_employee_id_fkey")
-  employeeId String
-  duration   Int      // in seconds
-  type       String   // "CLOCKED" or "MANUAL"
-  loggedAt   DateTime @default(now())
-
-  @@map("project_time_logs")
-}
-
-model Task {
-  id             String       @id @default(uuid())
-  name           String
-  status         TaskStatus   @default(BACKLOG)
-  priority       TaskPriority @default(MEDIUM)
-  dueDate        DateTime?
-  project        Project      @relation(fields: [projectId], references: [id])
-  projectId      String
-  employee       Employee?    @relation(fields: [employeeId], references: [id])
-  employeeId     String?
-  organization   Organization @relation(fields: [organizationId], references: [id])
-  organizationId String
-  createdAt      DateTime     @default(now())
-  updatedAt      DateTime     @updatedAt
-  activityLogs   ActivityLog[]
-  timeLogs       TaskTimeLog[]
-
-  @@map("tasks")
-}
-
-model Attendance {
-  id             String       @id @default(uuid())
-  date           DateTime     @db.Date
-  clockIn        DateTime
-  clockOut       DateTime?
-  status         String       @default("PRESENT") // PRESENT, ABSENT, ON_LEAVE
-  late           Boolean      @default(false)
-  duration       Int          @default(0) // Duration in seconds
-  employee       Employee     @relation(fields: [employeeId], references: [id])
-  employeeId     String
-  organization   Organization @relation(fields: [organizationId], references: [id])
-  organizationId String
-  createdAt      DateTime     @default(now())
-  updatedAt      DateTime     @updatedAt
-
-  @@map("attendance")
-}
-
-model ManualTime {
-  id             String       @id @default(uuid())
-  startTime      DateTime
-  endTime        DateTime
-  timezone       String?
-  type           String // e.g., "Work", "Meeting", "Break"
-  duration       Int // in seconds
-  note           String?      @db.Text
-  employee       Employee     @relation(fields: [employeeId], references: [id])
-  employeeId     String
-  organization   Organization @relation(fields: [organizationId], references: [id])
-  organizationId String
-  createdAt      DateTime     @default(now())
-  updatedAt      DateTime     @updatedAt
-
-  @@map("manual_time_entries")
-}
-
-model Shift {
-  id             String       @id @default(uuid())
-  startTime      String // e.g., "09:00"
-  endTime        String // e.g., "18:00"
-  date           DateTime     @db.Date
-  employee       Employee     @relation(fields: [employeeId], references: [id])
-  employeeId     String
-  organization   Organization @relation(fields: [organizationId], references: [id])
-  organizationId String
-  createdAt      DateTime     @default(now())
-  updatedAt      DateTime     @updatedAt
-
-  @@map("shifts")
-}
-
-model TimeOff {
-  id             String       @id @default(uuid())
-  startDate      DateTime     @db.Date
-  endDate        DateTime     @db.Date
-  type           String       // "Days" | "Hours"
-  timeOffType    String?      // "Sick Leave", "Annual Leave", etc.
-  timezone       String?
-  note           String?      @db.Text
-  singleDay      Boolean      @default(false)
-  employee       Employee     @relation(fields: [employeeId], references: [id])
-  employeeId     String
-  organization   Organization @relation(fields: [organizationId], references: [id])
-  organizationId String
-  createdAt      DateTime     @default(now())
-  updatedAt      DateTime     @updatedAt
-
-  @@map("time_offs")
-}
-
-model ActivityLog {
-  id             String           @id @default(uuid())
-  activityType   ActivityType     @default(ACTIVE)
-  productivity   ProductivityType @default(NEUTRAL)
-  duration       Int              @default(0) // In seconds
-  timestamp      DateTime         @default(now())
-  appWebsite     String?          @default("Unknown")
-  employee       Employee         @relation(fields: [employeeId], references: [id])
-  employeeId     String
-  task           Task?            @relation(fields: [taskId], references: [id])
-  taskId         String?
-  organization   Organization     @relation(fields: [organizationId], references: [id])
-  organizationId String
-  createdAt      DateTime         @default(now())
-  updatedAt      DateTime         @updatedAt
-
-  @@map("activity_logs")
-}
-
-model LocationLog {
-  id             String   @id @default(uuid())
-  employeeId     String
-  organizationId String
-  latitude       Float
-  longitude      Float
-  accuracy       Float?
-  source         String   @default("GPS")
-  createdAt      DateTime @default(now())
-
-  employee       Employee     @relation(fields: [employeeId], references: [id])
-  organization   Organization @relation(fields: [organizationId], references: [id])
-
-  @@map("location_logs")
-}
-
-model WorkZone {
-  id             String       @id @default(uuid())
-  organization   Organization @relation(fields: [organizationId], references: [id])
-  organizationId String
-  name           String
-  type           String       @default("Office")
-  latitude       Float
-  longitude      Float
-  radius         Float        @default(100.0) // In meters
-  createdAt      DateTime     @default(now())
-
-  @@map("work_zones")
-}
-
-model Location {
-  id             String       @id @default(uuid())
-  organization   Organization @relation(fields: [organizationId], references: [id])
-  organizationId String
-  name           String
-  type           String       @default("Office") // Office, Remote, Client
-  address        String?
-  latitude       Float?
-  longitude      Float?
-  threshold      Int          @default(4) // Default attendance threshold in hours
-  createdAt      DateTime     @default(now())
-
-  @@map("locations")
-}
-
-model ReportSetting {
-  id                  String       @id @default(uuid())
-  organization        Organization @relation(fields: [organizationId], references: [id])
-  organizationId      String       @unique
-  workloadOptimalFrom Int          @default(60)
-  workloadOptimalTo   Int          @default(85)
-  createdAt           DateTime     @default(now())
-  updatedAt           DateTime     @updatedAt
-
-  @@map("report_settings")
-}
-
-model PayrollRecord {
-  id         String        @id @default(uuid())
-  totalHours Float         @default(0.0)
-  amount     Float         @default(0.0)
-  status     PayrollStatus @default(UNPAID)
-  employee   Employee      @relation(fields: [employeeId], references: [id])
-  employeeId String
-  createdAt  DateTime      @default(now())
-  updatedAt  DateTime      @updatedAt
-
-  @@map("payroll_records")
-}
-
-model ComplianceSetting {
-  id                String       @id @default(uuid())
-  organization      Organization @relation(fields: [organizationId], references: [id])
-  organizationId    String       @unique
-  gdprEnabled       Boolean      @default(true)
-  activityMonitoring Boolean      @default(true)
-  locationTracking  Boolean      @default(true)
-  showUrlsInActivityLogs Boolean  @default(false)
-  blurLevel         Int          @default(2)
-  saveOriginalScreenshots Boolean @default(false)
-  collectPHI        Boolean?
-  twoFactorEnabled  Boolean      @default(false)
-  encryptionEnabled Boolean      @default(false)
-  consentPercentage Float        @default(0.0)
-  retentionPeriod   Int          @default(30) // In days
-  createdAt         DateTime     @default(now())
-  updatedAt         DateTime     @updatedAt
-
-  @@map("compliance_settings")
-}
-
-model AuditLog {
-  id             String       @id @default(uuid())
-  organization   Organization @relation(fields: [organizationId], references: [id])
-  organizationId String
-  user           Employee     @relation(fields: [userId], references: [id])
-  userId         String
-  action         String
-  status         String
-  ipAddress      String?
-  metadata       Json?
-  createdAt      DateTime     @default(now())
-
-  @@map("audit_logs")
-}
-
-model Screenshot {
-  id                  String           @id @default(uuid())
-  imageUrl            String           @db.LongText
-  productivity        ProductivityType @default(NEUTRAL)
-  blurred             Boolean          @default(false)
-  deletedByEmployee   Boolean          @default(false)
-  capturedAt          DateTime         @default(now())
-  employee            Employee         @relation(fields: [employeeId], references: [id])
-  employeeId          String
-  organization        Organization     @relation(fields: [organizationId], references: [id])
-  organizationId      String
-  createdAt           DateTime         @default(now())
-  updatedAt           DateTime         @updatedAt
-
-  @@map("screenshots")
-}
-
-model AppUsageLog {
-  id             String           @id @default(uuid())
-  appName        String
-  domain         String           @default("")
-  category       String           @default("Uncategorized")
-  productivity   ProductivityType @default(NEUTRAL)
-  duration       Int              @default(0) // in seconds
-  timestamp      DateTime         @default(now())
-  employee       Employee         @relation(fields: [employeeId], references: [id])
-  employeeId     String
-  organization   Organization     @relation(fields: [organizationId], references: [id])
-  organizationId String
-  createdAt      DateTime         @default(now())
-
-  @@map("app_usage_logs")
-}
-model Invoice {
-  id             String        @id @default(uuid())
-  invoiceNumber  String        @unique
-  clientName     String
-  clientEmail    String?
-  amount         Float
-  currency       String        @default("USD")
-  issueDate      DateTime      @default(now())
-  dueDate        DateTime
-  status         InvoiceStatus @default(DRAFT)
-  notes          String?       @db.Text
-  organization   Organization  @relation(fields: [organizationId], references: [id])
-  organizationId String
-  createdAt      DateTime      @default(now())
-  updatedAt      DateTime      @updatedAt
-
-  @@map("invoices")
-}
-
-model LiveActivity {
-  id             String   @id @default(uuid())
-  employeeId     String
-  organizationId String
-  activeApp      String
-  activeWindow   String
-  keystrokes     Int
-  mouseClicks    Int
-  idleTime       Int
-  createdAt      DateTime @default(now())
-
-  employee     Employee     @relation(fields: [employeeId], references: [id])
-  organization Organization @relation(fields: [organizationId], references: [id])
-
-  @@map("live_activities")
-}
-
-model InvitationToken {
-  id             String   @id @default(uuid())
-  email          String
-  token          String   @unique
-  organizationId String
-  role           String
-  expiresAt      DateTime
-  createdAt      DateTime @default(now())
-
-  @@map("invitation_tokens")
-}
-
-model AlertRule {
-  id             String       @id @default(uuid())
-  name           String
-  type           String       // "attendance", "security"
-  trigger        String       // e.g., "Late", "No-show"
-  scope          String       @default("All Employees")
-  organization   Organization @relation(fields: [organizationId], references: [id])
-  organizationId String
-  createdAt      DateTime     @default(now())
-  updatedAt      DateTime     @updatedAt
-
-  @@map("alert_rules")
-}
-
-model AlertSettings {
-  id                        String       @id @default(uuid())
-  organization              Organization @relation(fields: [organizationId], references: [id])
-  organizationId            String       @unique
-  
-  // Shift Scheduling
-  earliestClockIn           Int          @default(15)
-  latestClockOut            Int          @default(30)
-  tolerance                 Int          @default(10)
-  
-  // Absent Notification
-  absentInApp               Boolean      @default(true)
-  absentEmail               Boolean      @default(false)
-  
-  // Headcount Notification
-  headcountEnabled          Boolean      @default(true)
-  headcountLateThreshold    Int          @default(15)
-  headcountSendAfter        String       @default("scheduled_time")
-  headcountInApp            Boolean      @default(true)
-  headcountEmail            Boolean      @default(false)
-  
-  // Other
-  productivityLabeling      String       @default("daily")
-  manualTimeEntries         String       @default("daily")
-  
-  createdAt                 DateTime     @default(now())
-  updatedAt                 DateTime     @updatedAt
-
-  @@map("alert_settings")
-}
-
-model EmailReport {
-  id             String       @id @default(uuid())
-  title          String
-  frequency      String       // 'daily', 'weekly', 'monthly'
-  recipients     Json         // Array of emails
-  sendToSelf     Boolean      @default(true)
-  content        Json         // Array of content options
-  isActive       Boolean      @default(true)
-  organization   Organization @relation(fields: [organizationId], references: [id])
-  organizationId String
-  createdAt      DateTime     @default(now())
-  updatedAt      DateTime     @updatedAt
-
-  @@map("email_reports")
-}
-
-model Integration {
-  id             String       @id @default(uuid())
-  integrationId  String       // 'csvImport', 'asana', 'bambooHR', etc.
-  connected      Boolean      @default(false)
-  config         Json         // API keys, connections strings, OAuth tokens, etc.
-  organization   Organization @relation(fields: [organizationId], references: [id])
-  organizationId String
-  createdAt      DateTime     @default(now())
-  updatedAt      DateTime     @updatedAt
-
-  @@unique([organizationId, integrationId])
-  @@map("integrations")
-}
-
-model ProductivityTag {
-  id             String       @id @default(uuid())
-  name           String
-  color          String
-  organization   Organization @relation(fields: [organizationId], references: [id])
-  organizationId String
-  rules          ProductivityRule[]
-  createdAt      DateTime     @default(now())
-  updatedAt      DateTime     @updatedAt
-
-  @@map("productivity_tags")
-}
-
-model ProductivityRule {
-  id             String           @id @default(uuid())
-  appName        String?
-  domain         String
-  productivity   ProductivityType @default(NEUTRAL)
-  category       String?          @default("Uncategorized")
-  isBlocked      Boolean          @default(false)
-  tag            ProductivityTag? @relation(fields: [tagId], references: [id])
-  tagId          String?
-  team           Team?            @relation(fields: [teamId], references: [id])
-  teamId         String?
-  organization   Organization     @relation(fields: [organizationId], references: [id])
-  organizationId String
-  createdAt      DateTime         @default(now())
-  updatedAt      DateTime         @updatedAt
-
-  @@unique([organizationId, domain, teamId])
-  @@map("productivity_rules")
-}
-
-model TrackingSetting {
-  id                     String           @id @default(uuid())
-  title                  String
-  computerType           String           // 'company' | 'personal'
-  isDefault              Boolean          @default(false)
-  visibility             String           @default("visible") // 'visible' | 'stealth'
-  screenshotsPerHour     Int              @default(0)
-  allowAccessScreenshots Boolean          @default(false)
-  allowRemoveScreenshots Boolean          @default(false)
-  breakTime              Int              @default(0)
-  allowOverBreak         Boolean          @default(false)
-  allowNewBreaks         Boolean          @default(false)
-  idleTime               Int              @default(2)
-  trackingScenario       String           @default("unlimited")
-  workingDays            Json             // Array of days
-  trackTasks             Boolean          @default(false)
-  allowAddTasks          Boolean          @default(false)
-  permissions            Json             // canAnalyze, canSeeApps, canAddManual
-  organization           Organization     @relation(fields: [organizationId], references: [id])
-  organizationId         String
-  employees              Employee[]
-  createdAt              DateTime         @default(now())
-  updatedAt              DateTime         @updatedAt
-
-  @@map("tracking_settings")
-}
-
-model AdvancedTrackingSetting {
-  id                  String       @id @default(uuid())
-  shiftThreshold      Int          @default(4)
-  strictTime          Boolean      @default(false)
-  inactivityPopups    Boolean      @default(true)
-  identificationMode  String       @default("hwid")
-  showEngagement      Boolean      @default(false)
-  useActiveDirectory  Boolean      @default(true)
-  adEmail             Boolean      @default(true)
-  adTeam              Boolean      @default(true)
-  adTrackingSettings  Boolean      @default(false)
-  organization        Organization @relation(fields: [organizationId], references: [id])
-  organizationId      String       @unique
-  createdAt           DateTime     @default(now())
-  updatedAt           DateTime     @updatedAt
-
-  @@map("advanced_tracking_settings")
-}
-
-model Goal {
-  id             String            @id @default(uuid())
-  title          String
-  sub            String            // Category/Subtitle
-  targetDate     String            // String for flexibility like "End of Q4"
-  progress       Int               @default(0)
-  status         String            @default("ACTIVE") // ACTIVE, COMPLETED
-  color          String?           @default("text-indigo-600 bg-indigo-50")
-  organization   Organization      @relation(fields: [organizationId], references: [id])
-  organizationId String
-  stakeholders   GoalStakeholder[]
-  activities     GoalActivity[]
-  createdAt      DateTime          @default(now())
-  updatedAt      DateTime          @updatedAt
-
-  @@map("goals")
-}
-
-model GoalStakeholder {
-  id         String   @id @default(uuid())
-  goal       Goal     @relation(fields: [goalId], references: [id], onDelete: Cascade)
-  goalId     String
-  employee   Employee @relation(fields: [employeeId], references: [id], onDelete: Cascade)
-  employeeId String
-  createdAt  DateTime @default(now())
-
-  @@unique([goalId, employeeId])
-  @@map("goal_stakeholders")
-}
-
-model GoalActivity {
-  id         String   @id @default(uuid())
-  goal       Goal     @relation(fields: [goalId], references: [id], onDelete: Cascade)
-  goalId     String
-  title      String
-  status     String   // "Completed", "In Progress", "Pending"
-  type       String   // "milestone", "ops", "review", "upcoming"
-  activityDate DateTime @default(now())
-  createdAt  DateTime @default(now())
-
-  @@map("goal_activities")
-}
-
-model Agent {
-  id             String       @id @default(uuid())
-  employee       Employee     @relation(fields: [employeeId], references: [id])
-  employeeId     String       @unique
-  deviceId       String       @unique
-  status         String       @default("inactive") // "active", "inactive"
-  systemInfo     Json?
-  lastSeen       DateTime     @default(now())
-  createdAt      DateTime     @default(now())
-  updatedAt      DateTime     @updatedAt
-
-  @@map("agents")
-}
-
-model Tracking {
-  id             String       @id @default(uuid())
-  employee       Employee     @relation(fields: [employeeId], references: [id])
-  employeeId     String
-  screenshotUrl  String?      @db.LongText
-  videoUrl       String?      @db.LongText
-  activityStatus String?      // "active", "idle"
-  location       String?
-  source         String       @default("AGENT")
-  timestamp      DateTime     @default(now())
-  createdAt      DateTime     @default(now())
-
-  @@map("tracking_data")
-}
-
-model VideoRecording {
-  id             String       @id @default(uuid())
-  employee       Employee     @relation(fields: [employeeId], references: [id])
-  employeeId     String
-  organization   Organization @relation(fields: [organizationId], references: [id])
-  organizationId String
-  fileUrl        String       @db.LongText
-  sizeMb         Float?
-  createdAt      DateTime     @default(now())
-
-  @@map("video_recordings")
-}
-
 enum TimesheetStatus {
   DRAFT
   SUBMITTED
   APPROVED
   REJECTED
-}
-
-model Timesheet {
-  id              String            @id @default(uuid())
-  organization    Organization      @relation(fields: [organizationId], references: [id])
-  organizationId  String
-  employee        Employee          @relation(fields: [employeeId], references: [id])
-  employeeId      String
-  weekStart       String            // Format: "YYYY-MM-DD" (Always Monday)
-  status          TimesheetStatus   @default(DRAFT)
-  submittedAt     DateTime?
-  totalMinutes    Int               @default(0)
-  regularMinutes  Int               @default(0)
-  overtimeMinutes Int               @default(0)
-  totalPay        Float             @default(0.0)
-  approvals       TimesheetApproval[]
-  createdAt       DateTime          @default(now())
-  updatedAt       DateTime          @updatedAt
-
-  @@unique([organizationId, employeeId, weekStart])
-  @@index([organizationId, weekStart])
-  @@index([employeeId, weekStart])
-  @@map("timesheets")
-}
-
-model TimesheetApproval {
-  id           String    @id @default(uuid())
-  timesheet    Timesheet @relation(fields: [timesheetId], references: [id])
-  timesheetId  String
-  approverId   String
-  approverName String
-  decision     String    // "APPROVED" | "REJECTED"
-  comment      String?   @db.Text
-  createdAt    DateTime  @default(now())
-
-  @@index([timesheetId])
-  @@map("timesheet_approvals")
-}
-
-model TaskTimeLog {
-  id             String       @id @default(uuid())
-  taskId         String
-  employeeId     String
-  organizationId String
-  startTime      DateTime
-  endTime        DateTime?
-  duration       Int          @default(0) // duration in seconds
-  isRunning      Boolean      @default(true)
-  source         String       @default("WEB") // "WEB" | "DESKTOP_AGENT"
-  createdAt      DateTime     @default(now())
-  updatedAt      DateTime     @updatedAt
-
-  task           Task         @relation(fields: [taskId], references: [id])
-  employee       Employee     @relation(fields: [employeeId], references: [id])
-  organization   Organization @relation(fields: [organizationId], references: [id])
-
-  @@index([employeeId, isRunning])
-  @@index([taskId])
-  @@index([organizationId])
-  @@map("task_time_logs")
-}
-
-model AlertLog {
-  id             String       @id @default(uuid())
-  organization   Organization @relation(fields: [organizationId], references: [id])
-  organizationId String
-  employee       Employee     @relation(fields: [employeeId], references: [id])
-  employeeId     String
-  ruleType       String       // "LATE_ARRIVAL", "CONTINUOUS_IDLE", "PROHIBITED_APP", "SECURITY"
-  trigger        String       // e.g., "Late Arrival (18m)", "Idle (30m)", "Prohibited Application"
-  severity       String       @default("warning") // "critical", "warning", "info"
-  message        String       @db.Text
-  screenshotUrl  String?      @db.LongText
-  metadata       Json?
-  resolved       Boolean      @default(false)
-  createdAt      DateTime     @default(now())
-  updatedAt      DateTime     @updatedAt
-
-  @@index([organizationId, createdAt])
-  @@index([employeeId, createdAt])
-  @@map("alert_logs")
-}
-
-model Notification {
-  id             String       @id @default(uuid())
-  organization   Organization @relation(fields: [organizationId], references: [id])
-  organizationId String
-  targetUserId   String?      // null for all managers/admins, or specific userId
-  title          String
-  description    String?      @db.Text
-  type           String       @default("info") // "alert", "warning", "success", "info"
-  unread         Boolean      @default(true)
-  link           String?
-  metadata       Json?
-  createdAt      DateTime     @default(now())
-  updatedAt      DateTime     @updatedAt
-
-  @@index([organizationId, unread, createdAt])
-  @@map("notifications")
 }

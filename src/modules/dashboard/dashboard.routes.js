@@ -7,7 +7,7 @@ const roleMiddleware = require('../../middlewares/role.middleware');
 router.use(authMiddleware);
 
 router.get('/admin', roleMiddleware(['ADMIN']), dashboardController.getAdminDashboard);
-router.get('/manager', roleMiddleware(['MANAGER']), dashboardController.getManagerDashboard);
+router.get('/manager', roleMiddleware(['MANAGER', 'ADMIN']), dashboardController.getManagerDashboard);
 router.get('/me', dashboardController.getEmployeeDashboard);
 
 module.exports = router;

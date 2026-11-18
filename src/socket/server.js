@@ -37,7 +37,7 @@ const initSocketServer = (server) => {
                 const [empId, devId] = decoded.split(':');
                 prisma.employee.findUnique({
                     where: { id: empId },
-                    select: { organizationId: true }
+                    select: { organizationId: true, teamId: true }
                 }).then(emp => {
                     socket.user = { 
                         id: `agent_${empId}`, 
@@ -45,7 +45,8 @@ const initSocketServer = (server) => {
                         employeeId: empId, 
                         deviceId: devId,
                         role: 'AGENT',
-                        organizationId: emp?.organizationId || null
+                        organizationId: emp?.organizationId || null,
+                        teamId: emp?.teamId || null
                     };
                     return next();
                 }).catch(() => {
@@ -85,15 +86,16 @@ const initSocketServer = (server) => {
 
         // Handle Employee Connection
         if (employeeId) {
-            // Fetch current status from DB instead of assuming ONLINE
+            // Fetch current status and team from DB instead of assuming ONLINE
             prisma.employee.findUnique({
                 where: { id: employeeId },
-                select: { status: true }
+                select: { status: true, teamId: true }
             }).then(emp => {
                 const initialStatus = emp?.status || 'ONLINE';
                 liveSessions.set(employeeId, {
                     socketId: socket.id,
                     organizationId,
+                    teamId: emp?.teamId || socket.user?.teamId || null,
                     status: initialStatus,
                     lastActivity: new Date()
                 });
@@ -171,10 +173,13 @@ const initSocketServer = (server) => {
                 });
 
                 const activityType = idleTime > 60 ? 'IDLE' : 'ACTIVE';
+                const session = liveSessions.get(employeeId);
+                const employeeTeamId = session?.teamId || socket.user?.teamId || null;
                 const { cleanAppName, productivity, appCategory, appDomain } = await resolveAppActivityForOrg(
                     organizationId,
                     activeApp,
-                    activeWindow
+                    activeWindow,
+                    employeeTeamId
                 );
 
                 await activityService.createActivityLog({

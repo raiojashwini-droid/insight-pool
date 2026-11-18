@@ -26,6 +26,9 @@ const goalsRoutes = require('../modules/goals/goals.routes');
 const videosRoutes = require('../modules/videos/videos.routes');
 const timesheetsRoutes = require('../modules/timesheets/timesheets.routes');
 const notificationsRoutes = require('../modules/notifications/notifications.routes');
+const webhookIngressRoutes = require('../modules/webhooks/webhookIngress.routes');
+const processMiningRoutes = require('../modules/process-mining/processMining.routes');
+const complianceReadinessRoutes = require('../modules/compliance-readiness/complianceReadiness.routes');
 const { successResponse } = require('../utils/response');
 
 // Routes
@@ -34,6 +37,7 @@ router.use('/organization', organizationRoutes);
 router.use('/teams', teamsRoutes);
 router.use('/employees', employeesRoutes);
 router.use('/activity', activityRoutes);
+router.use('/activities', activityRoutes);
 router.use('/screenshots', screenshotsRoutes);
 router.use('/analytics', analyticsRoutes);
 router.use('/productivity', productivityRoutes);
@@ -55,6 +59,9 @@ router.use('/goals', goalsRoutes);
 router.use('/videos', videosRoutes);
 router.use('/timesheets', timesheetsRoutes);
 router.use('/notifications', notificationsRoutes);
+router.use('/webhooks', webhookIngressRoutes);
+router.use('/process-mining', processMiningRoutes);
+router.use('/compliance-readiness', complianceReadinessRoutes);
 
 router.get('/health', (req, res) => {
     return successResponse(res, null, 'Backend Running', 200);

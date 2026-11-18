@@ -16,12 +16,17 @@ const alertsController = {
     createAlertRule: async (req, res) => {
         try {
             const organizationId = await getOrganizationId(req);
+            const { name, type, trigger, scope } = req.body;
             const rule = await alertsService.createAlertRule({
-                ...req.body,
+                name: (name || '').trim() || 'Untitled Alert Rule',
+                type: (type || 'activity').toLowerCase(),
+                trigger: trigger || type || 'Activity Level',
+                scope: scope || 'All Employees',
                 organizationId
             });
             res.status(201).json(rule);
         } catch (error) {
+            console.error('[AlertsController] createAlertRule error:', error);
             res.status(400).json({ message: error.message });
         }
     },

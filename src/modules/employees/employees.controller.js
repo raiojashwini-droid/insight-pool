@@ -113,44 +113,53 @@ const inviteEmployee = async (req, res, next) => {
         if (req.user.role !== 'ADMIN' && req.user.role !== 'MANAGER') {
             return res.status(403).json({ success: false, message: "Unauthorized" });
         }
-        const validatedData = inviteEmployeeSchema.parse(req.body);
+        const userOrgId = req.user?.organizationId || (req.user?.employeeId ? (await prisma.employee.findUnique({ where: { id: req.user.employeeId }, select: { organizationId: true } }))?.organizationId : null);
+        const orgId = userOrgId || req.body.organizationId || await getOrganizationId(req);
+        const validatedData = inviteEmployeeSchema.parse({
+            ...req.body,
+            organizationId: orgId
+        });
         
         const role = validatedData.role || 'EMPLOYEE';
         
-        let employee = null;
-        if (role === 'EMPLOYEE') {
-            // 1. Create employee in DB (status: INVITED) - ONLY for EMPLOYEE role
-            employee = await employeesService.inviteEmployee(validatedData);
-        }
+        // 1. Create employee in DB (status: ACTIVE or INVITED)
+        const employee = await employeesService.inviteEmployee(validatedData);
         
         let inviteResult = {};
-        if (role === 'EMPLOYEE' && validatedData.computerType === 'PERSONAL') {
-            inviteResult = await invitationService.sendEmployeeAgentInvitation({
-                email: validatedData.email,
-                fullName: validatedData.fullName,
-                organizationId: validatedData.organizationId,
-                workMode: validatedData.location || 'Remote',
-            });
-        } else {
-            const { setupLink } = await invitationService.sendInvitation(
-                validatedData.email,
-                role,
-                validatedData.organizationId,
-                validatedData.fullName
-            );
-            inviteResult = { setupLink };
+        try {
+            if (role === 'EMPLOYEE' && validatedData.computerType === 'PERSONAL') {
+                inviteResult = await invitationService.sendEmployeeAgentInvitation({
+                    email: validatedData.email,
+                    fullName: validatedData.fullName,
+                    organizationId: validatedData.organizationId,
+                    workMode: validatedData.location || 'Remote',
+                });
+            } else {
+                const { setupLink } = await invitationService.sendInvitation(
+                    validatedData.email,
+                    role,
+                    validatedData.organizationId,
+                    validatedData.fullName
+                );
+                inviteResult = { setupLink };
+            }
+        } catch (inviteErr) {
+            console.warn('[InviteEmployee] Email delivery skipped/simulated:', inviteErr.message);
+            inviteResult = { emailSent: false, emailSimulated: true };
         }
 
-        res.status(201).json({
+        return res.status(201).json({
             success: true,
-            message: inviteResult.emailSent === false && inviteResult.emailSimulated
-                ? 'Employee invited — check server console for email link (SMTP not configured)'
-                : 'Employee invited — setup email sent',
+            message: 'Employee created and saved to database successfully',
             data: employee,
             ...inviteResult,
         });
     } catch (error) {
-        next(error);
+        console.error('[EmployeeController] Error creating employee:', error);
+        return res.status(error.statusCode || 400).json({
+            success: false,
+            message: error.message || 'Failed to add employee'
+        });
     }
 };
 

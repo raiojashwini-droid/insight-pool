@@ -95,7 +95,8 @@ const activityController = {
                 return successResponse(res, [], 'No organization activity found');
             }
 
-            const summary = await activityService.getOrganizationSummary(organizationId, startDate, endDate, { teamId, employeeId });
+            const targetEmployeeId = req.user.role === 'EMPLOYEE' ? (req.user.employeeId || employeeId) : employeeId;
+            const summary = await activityService.getOrganizationSummary(organizationId, startDate, endDate, { teamId, employeeId: targetEmployeeId });
             return successResponse(res, summary, 'Organization summary fetched successfully');
         } catch (error) {
             console.error('[ActivityController] Summary Error:', error);
@@ -128,6 +129,27 @@ const activityController = {
             const summary = await activityService.getTeamSummary(teamId, startDate, endDate);
             return successResponse(res, summary, 'Team summary fetched successfully');
         } catch (error) {
+            return errorResponse(res, error.message);
+        }
+    },
+
+    getTimelineReport: async (req, res) => {
+        try {
+            const organizationId = await getOrganizationId(req);
+            const { date, employeeId, teamId } = req.query;
+            const { role, employeeId: currentEmployeeId } = req.user;
+
+            const targetEmployeeId = role === 'EMPLOYEE' ? currentEmployeeId : employeeId;
+
+            const report = await activityService.getTimelineReport(
+                organizationId,
+                date,
+                targetEmployeeId,
+                teamId
+            );
+            return successResponse(res, report, 'Activities timeline report fetched successfully');
+        } catch (error) {
+            console.error('[ActivityController] Timeline Error:', error);
             return errorResponse(res, error.message);
         }
     },

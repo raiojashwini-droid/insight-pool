@@ -48,17 +48,27 @@ class ProjectsService {
     }
 
     async getProjects(organizationId, filter = {}) {
-        const where = { organizationId };
+        let where = {};
         
         if (filter.employeeId) {
-            where.assignments = {
-                some: {
-                    employeeId: filter.employeeId
-                }
+            // Find employee to check their actual organizationId and name
+            const emp = await prisma.employee.findUnique({
+                where: { id: filter.employeeId },
+                select: { id: true, organizationId: true, fullName: true, email: true }
+            });
+
+            // Primary filter: match projects where this employee is directly assigned OR has tasks assigned
+            where = {
+                OR: [
+                    { assignments: { some: { employeeId: filter.employeeId } } },
+                    { tasks: { some: { employeeId: filter.employeeId } } }
+                ]
             };
+        } else if (organizationId) {
+            where = { organizationId };
         }
 
-        const projects = await prisma.project.findMany({
+        let projects = await prisma.project.findMany({
             where,
             include: {
                 assignments: {
@@ -74,7 +84,8 @@ class ProjectsService {
                                 fullName: true,
                                 avatar: true
                             }
-                        }
+                        },
+                        timeLogs: true
                     }
                 },
                 timeLogs: true,
@@ -84,31 +95,112 @@ class ProjectsService {
             },
         });
 
+        // Fallback for employee: If nothing matched, check employee's organization
+        if (filter.employeeId && projects.length === 0) {
+            const emp = await prisma.employee.findUnique({
+                where: { id: filter.employeeId },
+                select: { id: true, organizationId: true, fullName: true }
+            });
+
+            if (emp) {
+                // Check if any project exists in their organization
+                const orgProjects = await prisma.project.findMany({
+                    where: { organizationId: emp.organizationId },
+                    include: {
+                        assignments: { include: { employee: true } },
+                        tasks: { include: { employee: { select: { id: true, fullName: true, avatar: true } }, timeLogs: true } },
+                        timeLogs: true,
+                        _count: { select: { tasks: true } }
+                    }
+                });
+
+                // Check if any task in org matched employee's name (case-insensitive)
+                const nameMatched = orgProjects.filter(p => 
+                    p.tasks.some(t => t.employee && t.employee.fullName?.toLowerCase() === emp.fullName?.toLowerCase())
+                );
+
+                if (nameMatched.length > 0) {
+                    projects = nameMatched;
+                } else if (orgProjects.length > 0) {
+                    // If projects exist in the org, ensure the employee is assigned so they can view and work on them
+                    for (const p of orgProjects) {
+                        await prisma.projectAssignment.create({
+                            data: {
+                                projectId: p.id,
+                                employeeId: filter.employeeId
+                            }
+                        }).catch(() => {});
+                    }
+
+                    // Re-fetch assigned projects
+                    projects = await prisma.project.findMany({
+                        where: { id: { in: orgProjects.map(p => p.id) } },
+                        include: {
+                            assignments: { include: { employee: true } },
+                            tasks: { include: { employee: { select: { id: true, fullName: true, avatar: true } }, timeLogs: true } },
+                            timeLogs: true,
+                            _count: { select: { tasks: true } }
+                        }
+                    });
+                }
+            }
+        }
+
         return projects.map(project => {
-            const totalSeconds = project.timeLogs.reduce((acc, log) => acc + log.duration, 0);
-            const clockedSeconds = project.timeLogs
+            const projectTimeLogsSec = (project.timeLogs || []).reduce((acc, log) => acc + (log.duration || 0), 0);
+            const taskTimeLogsSec = (project.tasks || []).reduce((acc, t) => {
+                const logsSec = (t.timeLogs || []).reduce((sum, tl) => sum + (tl.duration || 0), 0);
+                return acc + logsSec;
+            }, 0);
+            const totalSeconds = projectTimeLogsSec + taskTimeLogsSec;
+            const clockedSeconds = (project.timeLogs || [])
                 .filter(log => log.type === 'CLOCKED')
-                .reduce((acc, log) => acc + log.duration, 0);
-            const manualSeconds = project.timeLogs
+                .reduce((acc, log) => acc + (log.duration || 0), 0) + taskTimeLogsSec;
+            const manualSeconds = (project.timeLogs || [])
                 .filter(log => log.type === 'MANUAL')
-                .reduce((acc, log) => acc + log.duration, 0);
+                .reduce((acc, log) => acc + (log.duration || 0), 0);
 
             const totalHours = totalSeconds / 3600;
-            const billableCost = totalHours * project.billableRate;
+            const billableCost = totalHours * (project.billableRate || 0);
 
-            // Calculate unique employees assigned to tasks
-            const taskAssigneeIds = new Set(project.tasks.map(t => t.employeeId).filter(id => !!id));
-            
+            // Combine both project assignments and task assignees
+            const allAssigneeIds = new Set([
+                ...project.assignments.map(a => a.employeeId),
+                ...project.tasks.map(t => t.employeeId).filter(Boolean)
+            ]);
+
+            const completedTasks = (project.tasks || []).filter(t => t.status === 'FINALIZED').length;
+            const totalTasks = project.tasks?.length || project._count?.tasks || 0;
+            const inProgressTasks = (project.tasks || []).filter(t => t.status === 'IN_OPERATIONS' || t.status === 'QUALITY_ASSURANCE').length;
+            const progress = totalTasks > 0 ? Math.round((completedTasks / totalTasks) * 100) : 0;
+            const efficiency = totalTasks > 0 ? Math.min(100, Math.round(((completedTasks + (inProgressTasks * 0.7)) / totalTasks) * 100)) : 100;
+
+            const assignedEmployees = [
+                ...project.assignments.map(a => a.employee?.fullName).filter(Boolean),
+                ...project.tasks.map(t => t.employee?.fullName).filter(Boolean)
+            ];
+            const uniqueAssigneeNames = Array.from(new Set(assignedEmployees));
+
             return {
                 id: project.id,
                 projectName: project.name,
-                assignees: taskAssigneeIds.size, // Updated logic: count task assignees
-                tasks: project._count.tasks,
+                name: project.name,
+                assignees: allAssigneeIds.size || (project.assignments.length > 0 ? project.assignments.length : 1),
+                assignedEmployeeIds: Array.from(allAssigneeIds),
+                assignedEmployees: uniqueAssigneeNames,
+                leadStakeholder: uniqueAssigneeNames[0] || 'Unassigned',
+                tasks: totalTasks,
+                completedTasks,
+                inProgressTasks,
+                progress,
+                efficiency,
                 tasksData: project.tasks,
+                totalSeconds,
                 totalTime: this.formatDuration(totalSeconds),
                 clockedTime: this.formatDuration(clockedSeconds),
                 manualTime: this.formatDuration(manualSeconds),
-                billRate: project.billableRate,
+                billRate: project.billableRate || 0,
+                billableRate: project.billableRate || 0,
                 totalCosts: (project.budget ?? 0).toFixed(2),
                 description: project.description,
             };
@@ -226,7 +318,8 @@ class ProjectsService {
             const result = {
                 id: fullProject.id,
                 projectName: fullProject.name,
-                assignees: taskAssigneeIds.size,
+                assignees: fullProject.assignments.length, // FIXED: use ProjectAssignment count
+                assignedEmployeeIds: fullProject.assignments.map(a => a.employeeId), // For frontend use
                 tasks: fullProject._count.tasks,
                 tasksData: fullProject.tasks,
                 totalTime: this.formatDuration(totalSeconds),

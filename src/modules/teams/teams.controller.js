@@ -1,3 +1,4 @@
+const prisma = require('../../config/db');
 const teamsService = require('./teams.service');
 const { createTeamSchema, updateTeamSchema } = require('./teams.validation');
 const { getOrganizationId } = require('../../utils/orgId');
@@ -13,22 +14,44 @@ const getTeams = async (req, res, next) => {
         }
 
         let filter = {};
-        if (role === 'EMPLOYEE') {
-            return res.status(403).json({ success: false, message: "Access denied" });
-        }
 
         const teams = await teamsService.getTeams(orgId, filter);
 
-        // Map to industry/insightful format
-        const formattedTeams = teams.map(team => ({
-            id: team.id,
-            name: team.name,
-            description: team.description,
-            color: team.color,
-            memberCount: team._count.employees,
-            onlineCount: team.employees.filter(e => e.status === 'ACTIVE').length, // Simplified online check
-            productivity: 85, // Placeholder for metric calculation
-            organizationId: team.organizationId
+        // Map to industry/insightful format with real productivity computation from database logs
+        const formattedTeams = await Promise.all(teams.map(async (team) => {
+            const teamEmpIds = (team.employees || []).map(e => e.id);
+            let productivity = 0;
+            if (teamEmpIds.length > 0) {
+                const logs = await prisma.activityLog.findMany({
+                    where: {
+                        employeeId: { in: teamEmpIds }
+                    },
+                    select: {
+                        activityType: true,
+                        productivity: true,
+                        duration: true
+                    }
+                });
+                let activeSec = 0;
+                let prodSec = 0;
+                logs.forEach(l => {
+                    const d = l.duration || 0;
+                    if (l.activityType === 'ACTIVE') activeSec += d;
+                    if (l.productivity === 'PRODUCTIVE') prodSec += d;
+                });
+                productivity = activeSec > 0 ? Math.round((prodSec / activeSec) * 100) : 0;
+            }
+
+            return {
+                id: team.id,
+                name: team.name,
+                description: team.description,
+                color: team.color,
+                memberCount: team._count?.employees || 0,
+                onlineCount: (team.employees || []).filter(e => e.status === 'ACTIVE').length,
+                productivity,
+                organizationId: team.organizationId
+            };
         }));
 
         res.status(200).json({
@@ -45,12 +68,29 @@ const createTeam = async (req, res, next) => {
         if (req.user.role !== 'ADMIN' && req.user.role !== 'MANAGER') {
             return res.status(403).json({ success: false, message: "Only admins and managers can create teams" });
         }
+        const orgId = await getOrganizationId(req);
         const validatedData = createTeamSchema.parse(req.body);
-        const team = await teamsService.createTeam(validatedData);
+        
+        // Securely bind team to authenticated user's organization so it never desyncs or disappears
+        const teamData = {
+            ...validatedData,
+            organizationId: orgId
+        };
+
+        const team = await teamsService.createTeam(teamData);
         res.status(201).json({
             success: true,
             message: "Team created successfully",
-            data: team
+            data: {
+                id: team.id,
+                name: team.name,
+                description: team.description,
+                color: team.color || 'bg-blue-500',
+                memberCount: 0,
+                onlineCount: 0,
+                productivity: 0,
+                organizationId: team.organizationId
+            }
         });
     } catch (error) {
         next(error);

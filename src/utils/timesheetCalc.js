@@ -4,6 +4,14 @@
  * unpaid break deductions, and configurable weekly overtime thresholds.
  */
 
+function isValidDate(d) {
+    if (d === null || d === undefined || d === '') return false;
+    if (d instanceof Date) return !isNaN(d.getTime());
+    if (typeof d !== 'string') return false;
+    const date = new Date(d.includes('T') ? d : d + 'T00:00:00Z');
+    return !isNaN(date.getTime());
+}
+
 function isoDay(d) {
     if (!d) return '';
     const date = new Date(d);
@@ -17,7 +25,13 @@ function addDays(dateStr, n) {
 }
 
 function mondayOf(d = new Date()) {
+    if (d === null || d === undefined || d === '') d = new Date();
     const date = typeof d === 'string' ? new Date(d.includes('T') ? d : d + 'T00:00:00Z') : new Date(d);
+    if (isNaN(date.getTime())) {
+        const err = new Error(`Invalid date format for week: "${d}". Expected valid date (e.g. YYYY-MM-DD)`);
+        err.statusCode = 400;
+        throw err;
+    }
     const day = date.getUTCDay();
     const diff = (day + 6) % 7; // diff to Monday
     date.setUTCDate(date.getUTCDate() - diff);
@@ -127,6 +141,7 @@ function buildDailyBreakdown(attendanceRecords = [], manualRecords = [], breakRe
                     type: 'attendance',
                     clockIn: att.clockIn,
                     clockOut: att.clockOut,
+                    durationSeconds: att.duration || Math.max(0, Math.floor((eMs - sMs) / 1000)),
                     minutes: Math.round((we - ws) / 60000),
                     isLive,
                     crossMidnight
@@ -161,6 +176,7 @@ function buildDailyBreakdown(attendanceRecords = [], manualRecords = [], breakRe
                         note: man.note || man.type,
                         startTime: man.startTime,
                         endTime: man.endTime,
+                        durationSeconds: man.duration || Math.max(0, Math.floor((we - ws) / 1000)),
                         minutes: Math.round((we - ws) / 60000)
                     });
                 }
@@ -258,6 +274,7 @@ function calculatePay(regularMinutes, overtimeMinutes, hourlyRate = 0, otMultipl
 }
 
 module.exports = {
+    isValidDate,
     isoDay,
     addDays,
     mondayOf,

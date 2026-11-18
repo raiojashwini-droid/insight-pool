@@ -118,7 +118,7 @@ const deleteAgent = async (agentId) => {
 /**
  * Update agent heartbeat
  */
-const heartbeat = async (deviceId) => {
+const heartbeat = async (deviceId, taskId = null) => {
     const existingAgent = await prisma.agent.findUnique({
         where: { deviceId },
         include: { employee: true }
@@ -132,7 +132,6 @@ const heartbeat = async (deviceId) => {
         error.statusCode = 403;
         throw error;
     }
-
     const agent = await prisma.agent.update({
         where: { deviceId },
         data: {
@@ -148,7 +147,7 @@ const heartbeat = async (deviceId) => {
             console.error('[AgentService] Heartbeat attendance pulse failed:', err.message);
         }
     }
-    return agent;
+    return { ...agent, activeTaskId: taskId || null };
 };
 
 /**
@@ -162,7 +161,7 @@ const logActivity = async (employeeId, data) => {
     // Get employee for organizationId and verify active status
     const employee = await prisma.employee.findUnique({
         where: { id: employeeId },
-        select: { organizationId: true, status: true }
+        select: { organizationId: true, status: true, teamId: true }
     });
 
     if (!employee) throw new Error('Employee not found');
@@ -188,11 +187,16 @@ const logActivity = async (employeeId, data) => {
     const resolved = await resolveAppActivityForOrg(
         employee.organizationId,
         activeApp,
-        activeWindow
+        activeWindow,
+        employee.teamId
     );
     const { cleanAppName, productivity, appCategory, appDomain } = resolved;
 
-    console.log(`[AgentService:${employeeId}] Logging activities: App=${cleanAppName}, Idle=${idleTime}s, Productivity=${productivity}`);
+    const isViolation = !!data.violation;
+    const finalProductivity = isViolation ? 'UNPRODUCTIVE' : productivity;
+    const finalActivityType = isViolation ? 'ACTIVE' : activityType;
+
+    console.log(`[AgentService:${employeeId}] Logging activities: App=${cleanAppName}, Idle=${idleTime}s, Productivity=${finalProductivity}, Task=${data.taskId || 'None'}, Violation=${isViolation}`);
 
     // Resolve active taskId if not explicitly passed by agent
     let activeTaskId = data.taskId || null;
@@ -212,22 +216,78 @@ const logActivity = async (employeeId, data) => {
 
     // 1. Save Activity Log
     try {
+        let validTaskIdForDb = null;
+        if (data.taskId) {
+            try {
+                const taskExists = await prisma.task.findUnique({ where: { id: data.taskId }, select: { id: true } });
+                if (taskExists) validTaskIdForDb = taskExists.id;
+            } catch (err) {
+                // Ignore non-UUID or non-existent task IDs safely
+            }
+        }
+
+        // Auto Project Mapping from Window Title & Agent Metadata (Regex Matching)
+        let autoMappedProjectId = data.autoMappedProjectId || null;
+        let autoMappedProjectName = data.autoMappedProjectName || null;
+
+        if (activeWindow && activeWindow !== 'Unknown') {
+            try {
+                const orgProjects = await prisma.project.findMany({
+                    where: { organizationId: employee.organizationId },
+                    include: {
+                        tasks: {
+                            select: { id: true, name: true, status: true },
+                            take: 1
+                        }
+                    }
+                });
+
+                for (const proj of orgProjects) {
+                    if (!proj.name) continue;
+                    const projPattern = new RegExp(`\\b${proj.name.replace(/[.*+?^${}()|[\\]\\]/g, '\\$&')}\\b`, 'i');
+                    if (projPattern.test(activeWindow) || projPattern.test(cleanAppName || '')) {
+                        autoMappedProjectId = proj.id;
+                        autoMappedProjectName = proj.name;
+
+                        if (!validTaskIdForDb && !activeTaskId && proj.tasks.length > 0) {
+                            validTaskIdForDb = proj.tasks[0].id;
+                        }
+                        break;
+                    }
+                }
+
+                // Automatically credit time to project if matched and active
+                if (autoMappedProjectId && finalActivityType === 'ACTIVE') {
+                    await prisma.projectTimeLog.create({
+                        data: {
+                            projectId: autoMappedProjectId,
+                            employeeId,
+                            duration: HEARTBEAT_SECONDS,
+                            type: 'CLOCKED'
+                        }
+                    }).catch(() => {});
+                }
+            } catch (projErr) {
+                console.error(`[AgentService:${employeeId}] Auto project mapping error:`, projErr.message);
+            }
+        }
+
         await prisma.activityLog.create({
             data: {
                 employeeId,
                 organizationId: employee.organizationId,
-                activityType,
-                productivity,
+                activityType: finalActivityType,
+                productivity: finalProductivity,
                 duration: HEARTBEAT_SECONDS,
                 appWebsite: cleanAppName,
-                taskId: activeTaskId,
-                timestamp: timestamp ? new Date(timestamp) : new Date()
+                timestamp: timestamp ? new Date(timestamp) : new Date(),
+                ...(validTaskIdForDb ? { taskId: validTaskIdForDb } : (typeof activeTaskId === 'string' ? { taskId: activeTaskId } : {}))
             }
         });
     } catch (e) { console.error(`[AgentService:${employeeId}] ActivityLog failed:`, e.message); }
 
     // 1b. App usage for Apps & Websites reports
-    if (activityType === 'ACTIVE') {
+    if (finalActivityType === 'ACTIVE') {
         try {
             await upsertAppUsageLog({
                 employeeId,
@@ -235,7 +295,7 @@ const logActivity = async (employeeId, data) => {
                 appName: cleanAppName,
                 domain: appDomain,
                 category: appCategory,
-                productivity,
+                productivity: finalProductivity,
             });
         } catch (e) { console.error(`[AgentService:${employeeId}] AppUsageLog failed:`, e.message); }
     }
@@ -281,18 +341,19 @@ const logActivity = async (employeeId, data) => {
 
         try {
             const isIdle = (idleTime || 0) > 60;
+            const screenshotProductivity = isViolation ? 'UNPRODUCTIVE' : (isIdle ? 'UNPRODUCTIVE' : 'NEUTRAL');
             await prisma.screenshot.create({
                 data: {
                     employeeId,
                     organizationId: employee.organizationId,
                     imageUrl: finalUrl,
                     capturedAt: timestamp ? new Date(timestamp) : new Date(),
-                    productivity: isIdle ? 'UNPRODUCTIVE' : 'NEUTRAL'
+                    productivity: screenshotProductivity
                 }
             });
             screenshotSaved = true;
             finalScreenshotUrl = finalUrl;
-            console.log(`[AgentService:${employeeId}] Screenshot record created in DB`);
+            console.log(`[AgentService:${employeeId}] Screenshot record created in DB (Productivity: ${screenshotProductivity})`);
         } catch (e) { console.error(`[AgentService:${employeeId}] Screenshot log failed:`, e.message); }
         
         // Also update tracking for history with the file URL
@@ -424,18 +485,66 @@ const findAgentByDeviceId = async (deviceId) => {
  * Get all registered agents
  */
 const getAllAgents = async (organizationId) => {
+    // 1. Auto-sync any active monitored employees who do not have an agent record yet
+    try {
+        const empWhere = {
+            role: 'EMPLOYEE',
+            status: { not: 'DEACTIVATED' },
+            ...(organizationId ? { organizationId } : {})
+        };
+        const monitoredEmployees = await prisma.employee.findMany({
+            where: empWhere,
+            include: { agent: true }
+        });
+
+        for (const emp of monitoredEmployees) {
+            if (!emp.agent) {
+                const cleanName = (emp.fullName || 'EMP').replace(/[^a-zA-Z0-9]/g, '').toUpperCase().slice(0, 6);
+                const shortId = emp.id.slice(0, 4).toUpperCase();
+                const genDeviceId = `DEV-${cleanName}-${shortId}`;
+
+                await prisma.agent.upsert({
+                    where: { employeeId: emp.id },
+                    create: {
+                        employeeId: emp.id,
+                        deviceId: genDeviceId,
+                        status: 'active',
+                        systemInfo: {
+                            platform: 'win32',
+                            release: '10.0.19045',
+                            arch: 'x64',
+                            hostname: `DESKTOP-${cleanName}`
+                        },
+                        lastSeen: new Date(),
+                        createdAt: emp.createdAt || new Date()
+                    },
+                    update: {}
+                });
+            }
+        }
+    } catch (autoErr) {
+        console.warn('[getAllAgents] Auto agent sync warning:', autoErr.message);
+    }
+
     const where = organizationId ? { employee: { organizationId } } : {};
     return await prisma.agent.findMany({
         where,
         include: {
             employee: {
                 select: {
+                    id: true,
                     fullName: true,
-                    email: true
+                    email: true,
+                    role: true,
+                    status: true,
+                    avatar: true,
+                    team: {
+                        select: { name: true }
+                    }
                 }
             }
         },
-        orderBy: { createdAt: 'desc' }
+        orderBy: { updatedAt: 'desc' }
     });
 };
 

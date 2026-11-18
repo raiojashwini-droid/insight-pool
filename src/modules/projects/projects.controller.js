@@ -22,16 +22,38 @@ class ProjectsController {
     async getProjects(req, res, next) {
         try {
             const organizationId = await getOrganizationId(req);
-            const { role, employeeId } = req.user;
+            let { role, employeeId, userId, email } = req.user || {};
+            const queryEmployeeId = req.query.employeeId;
 
-            if (!organizationId) {
-                return errorResponse(res, 'Organization ID is required', 400);
+            let effectiveEmployeeId = (queryEmployeeId && queryEmployeeId !== 'null' && queryEmployeeId !== 'undefined')
+                ? queryEmployeeId
+                : employeeId;
+
+            const isEmployeeRole = String(role).toUpperCase() === 'EMPLOYEE';
+
+            if (!effectiveEmployeeId && isEmployeeRole) {
+                if (userId) {
+                    const u = await prisma.user.findUnique({
+                        where: { id: userId },
+                        select: { employeeId: true }
+                    });
+                    effectiveEmployeeId = u?.employeeId;
+                }
+                if (!effectiveEmployeeId && email) {
+                    const emp = await prisma.employee.findFirst({
+                        where: { email },
+                        select: { id: true }
+                    });
+                    effectiveEmployeeId = emp?.id;
+                }
             }
 
             let filter = {};
-            if (role === 'EMPLOYEE' && employeeId) {
-                filter.employeeId = employeeId;
+            if (isEmployeeRole || (queryEmployeeId && queryEmployeeId !== 'null')) {
+                filter.employeeId = effectiveEmployeeId;
             }
+
+            console.log(`[ProjectsController.getProjects] userRole: ${role}, effectiveEmployeeId: ${effectiveEmployeeId}, org: ${organizationId}`);
 
             const projects = await projectsService.getProjects(organizationId, filter);
             return successResponse(res, projects, 'Projects fetched successfully');

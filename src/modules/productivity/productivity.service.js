@@ -167,7 +167,7 @@ const productivityService = {
         let teamRules = [];
         let globalRules = [];
 
-        const [logs, allRules] = await Promise.all([
+        const [logs, allRules, actLogs] = await Promise.all([
             prisma.appUsageLog.findMany({
                 where,
                 include: teamId ? { employee: { select: { teamId: true } } } : undefined
@@ -175,6 +175,13 @@ const productivityService = {
             prisma.productivityRule.findMany({
                 where: { organizationId },
                 include: { tag: true }
+            }),
+            prisma.activityLog.findMany({
+                where: {
+                    organizationId,
+                    ...(startDate || endDate ? { timestamp: where.timestamp } : {})
+                },
+                select: { appWebsite: true, duration: true, productivity: true }
             })
         ]);
 
@@ -199,10 +206,10 @@ const productivityService = {
 
         const appMap = {};
 
+        // 1. Process AppUsageLog entries
         logs.forEach(log => {
             const key = log.appName;
             if (!appMap[key]) {
-                // Try team-specific rule first, then fall back to global
                 let rule = null;
                 if (teamId) {
                     rule =
@@ -234,6 +241,70 @@ const productivityService = {
             }
             appMap[key].totalUsage += log.duration || 0;
         });
+
+        // 2. Process ActivityLog entries (fallback / supplemental)
+        actLogs.forEach(act => {
+            const key = act.appWebsite || 'Unknown';
+            if (key === 'Unknown') return;
+            if (!appMap[key]) {
+                let rule = teamMaps.byApp.get(key.toLowerCase()) || globalMaps.byApp.get(key.toLowerCase());
+                const productivity = rule?.productivity || act.productivity;
+                appMap[key] = {
+                    id: ruleDomainKey('', key),
+                    appName: key,
+                    domain: key.toLowerCase().replace(/\s+/g, '-'),
+                    category: rule?.category || 'General',
+                    productivity,
+                    productivityLabel: productivity,
+                    tagId: rule?.tagId || null,
+                    tag: rule?.tag || null,
+                    teamId: rule?.teamId || null,
+                    isTeamSpecific: rule?.teamId ? true : false,
+                    totalUsage: 0,
+                };
+            }
+            appMap[key].totalUsage += act.duration || 0;
+        });
+
+        // 3. Include any configured rules that haven't registered usage yet
+        allRules.forEach(rule => {
+            const key = rule.appName || rule.domain;
+            if (key && !appMap[key]) {
+                appMap[key] = {
+                    id: rule.domain || rule.appName,
+                    appName: rule.appName || rule.domain,
+                    domain: rule.domain || '',
+                    category: rule.category || 'Uncategorized',
+                    productivity: rule.productivity || 'NEUTRAL',
+                    productivityLabel: rule.productivity || 'NEUTRAL',
+                    tagId: rule.tagId || null,
+                    tag: rule.tag || null,
+                    teamId: rule.teamId || null,
+                    isTeamSpecific: rule.teamId ? true : false,
+                    totalUsage: 0,
+                };
+            }
+        });
+
+        // 4. Default Seed if brand new organization
+        if (Object.keys(appMap).length === 0) {
+            APPS.forEach(defaultApp => {
+                const key = defaultApp.name;
+                appMap[key] = {
+                    id: defaultApp.domain,
+                    appName: defaultApp.name,
+                    domain: defaultApp.domain,
+                    category: defaultApp.category,
+                    productivity: defaultApp.productivity,
+                    productivityLabel: defaultApp.productivity,
+                    tagId: null,
+                    tag: null,
+                    teamId: null,
+                    isTeamSpecific: false,
+                    totalUsage: 0,
+                };
+            });
+        }
 
         return Object.values(appMap)
             .map(app => ({

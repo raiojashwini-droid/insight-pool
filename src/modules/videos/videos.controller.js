@@ -5,21 +5,39 @@ const fs = require('fs');
 const path = require('path');
 
 const videosController = {
-    // POST /api/videos — Upload a video recording from the WebTrackerAgent
+    // POST /api/videos — Upload a video recording from the WebTrackerAgent or Screen Recorder
     uploadVideo: async (req, res) => {
         try {
-            const { employeeId } = req.body;
+            let { employeeId } = req.body;
             const organizationId = await getOrganizationId(req);
 
-            if (!employeeId) {
-                return errorResponse(res, 'employeeId is required', 400);
+            // Resilient employee resolution:
+            // 1. Check passed employeeId
+            // 2. Fallback to authenticated user's employeeId
+            // 3. Fallback to first non-deactivated employee in the organization
+            if (!employeeId || employeeId === 'null' || employeeId === 'undefined' || employeeId === 'All') {
+                employeeId = req.user?.employeeId;
             }
 
-            // Guard: Reject deactivated employee
-            const emp = await prisma.employee.findUnique({ where: { id: employeeId }, select: { status: true } });
-            if (!emp) {
-                return errorResponse(res, 'Employee not found', 404);
+            let emp = null;
+            if (employeeId) {
+                emp = await prisma.employee.findUnique({
+                    where: { id: employeeId },
+                    select: { id: true, status: true }
+                });
             }
+
+            if (!emp) {
+                emp = await prisma.employee.findFirst({
+                    where: { organizationId, status: { not: 'DEACTIVATED' } },
+                    select: { id: true, status: true }
+                });
+            }
+
+            if (!emp) {
+                return errorResponse(res, 'No active employee found for recording upload', 404);
+            }
+
             if (emp.status === 'DEACTIVATED') {
                 return res.status(403).json({
                     success: false,
@@ -27,6 +45,8 @@ const videosController = {
                     message: 'Cannot upload video for a deactivated employee'
                 });
             }
+
+            employeeId = emp.id;
 
             if (!req.file) {
                 return errorResponse(res, 'video file is required', 400);

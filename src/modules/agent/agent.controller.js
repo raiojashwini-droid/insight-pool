@@ -8,6 +8,7 @@ const { getIO } = require('../../socket/server');
 const { getOrganizationId } = require('../../utils/orgId');
 
 const invitationService = require('../auth/invitation.service');
+const { sendIdleAlertEmail } = require('../../utils/email.service');
 
 const register = async (req, res) => {
     try {
@@ -176,7 +177,7 @@ const register = async (req, res) => {
 
 const heartbeat = async (req, res) => {
     try {
-        const { deviceId } = req.body;
+        const { deviceId, taskId } = req.body;
         if (!deviceId) return errorResponse(res, 'Device ID is required', 400);
 
         const agent = await prisma.agent.findUnique({ 
@@ -199,8 +200,13 @@ const heartbeat = async (req, res) => {
             return errorResponse(res, 'Agent is not approved. Please contact admin.', 403);
         }
 
-        await agentService.heartbeat(deviceId);
-        return successResponse(res, null, 'Heartbeat received');
+        // Validate and sanitize taskId safely (Requirement 2 & 4)
+        const validatedTaskId = (typeof taskId === 'string' && taskId.trim().length > 0)
+            ? taskId.trim()
+            : null;
+
+        await agentService.heartbeat(deviceId, validatedTaskId);
+        return successResponse(res, { deviceId, taskId: validatedTaskId }, 'Heartbeat received');
     } catch (error) {
         if (error.code === 'ACCOUNT_DEACTIVATED') {
             return res.status(403).json({
@@ -216,10 +222,17 @@ const heartbeat = async (req, res) => {
 
 const logActivity = async (req, res) => {
     try {
-        const { employeeId, data } = req.body;
+        const { employeeId, data, taskId } = req.body;
         const authHeader = req.headers['x-agent-auth'] || req.headers['X-Agent-Auth'];
 
         if (!employeeId || !data) return errorResponse(res, 'Employee ID and Data are required', 400);
+
+        // Validate and sanitize taskId safely (Requirement 2 & 4)
+        const rawTaskId = taskId || data.taskId;
+        const validatedTaskId = (typeof rawTaskId === 'string' && rawTaskId.trim().length > 0)
+            ? rawTaskId.trim()
+            : null;
+        data.taskId = validatedTaskId;
 
         // Check Agent Status
         const agent = await prisma.agent.findUnique({ 
@@ -257,28 +270,45 @@ const logActivity = async (req, res) => {
         if (io && organizationId) {
             const room = `org_${organizationId}`;
             
-            // 1. Notify about new screenshot
+            // 1. Notify about new screenshot (with taskId & violation metadata)
             if (logResult?.screenshotSaved && logResult?.finalScreenshotUrl) {
                 io.to(room).emit('screenshot:new', {
                     employeeId,
                     imageUrl: logResult.finalScreenshotUrl,
                     capturedAt: data.timestamp || new Date(),
-                    productivity: 'NEUTRAL',
-                    employeeName: agent.employee.fullName
+                    productivity: data.violation ? 'UNPRODUCTIVE' : (logResult?.productivity || 'NEUTRAL'),
+                    employeeName: agent.employee.fullName,
+                    taskId: validatedTaskId,
+                    violation: !!data.violation,
+                    violationType: data.violationType || null
                 });
             } else if (data.screenshotUrl) {
                 // Helps debug live mismatch: agent sent screenshot but DB/storage save failed.
                 console.warn(`[AgentController] Screenshot event skipped (not persisted) for employee ${employeeId}`);
             }
 
-            // 2. Update activity stream (resolved app name from service)
+            // 1b. If activity violation detected, emit alert
+            if (data.violation) {
+                io.to(room).emit('alert:violation', {
+                    employeeId,
+                    employeeName: agent.employee.fullName,
+                    appName: data.activeApp,
+                    windowTitle: data.activeWindow,
+                    violationType: data.violationType || 'BLACKLISTED_ACTIVITY',
+                    taskId: validatedTaskId,
+                    timestamp: data.timestamp || new Date()
+                });
+            }
+
+            // 2. Update activity stream (with taskId)
             io.to(room).emit('activity:update', {
                 employeeId,
                 activeApp: logResult?.cleanAppName || data.activeApp || 'Unknown',
                 activeWindow: data.activeWindow || 'Unknown',
                 idleTime: data.idleTime || 0,
-                productivity: logResult?.productivity || 'NEUTRAL',
+                productivity: data.violation ? 'UNPRODUCTIVE' : (logResult?.productivity || 'NEUTRAL'),
                 location: data.location ? `${data.location.city}, ${data.location.country}` : 'Remote',
+                taskId: validatedTaskId,
                 timestamp: new Date()
             });
 
@@ -289,7 +319,7 @@ const logActivity = async (req, res) => {
             });
         }
 
-        return successResponse(res, null, 'Activity logged');
+        return successResponse(res, { taskId: validatedTaskId, violation: !!data.violation }, 'Activity logged');
     } catch (error) {
         console.error('Agent logActivity error:', error);
         return errorResponse(res, error.message || 'Failed to log activity', 500);
@@ -430,7 +460,20 @@ const update = async (req, res) => {
 };
 
 const remove = async (req, res) => {
-// ... existing code ...
+    try {
+        const { id } = req.params;
+        let agent = await prisma.agent.findUnique({ where: { id } });
+        if (!agent) {
+            agent = await prisma.agent.findFirst({ where: { employeeId: id } });
+        }
+        if (!agent) {
+            return errorResponse(res, 'Agent device not found', 404);
+        }
+        await agentService.deleteAgent(agent.id);
+        return successResponse(res, null, 'Agent device removed successfully');
+    } catch (error) {
+        return errorResponse(res, error.message || 'Failed to remove agent', 500);
+    }
 };
 
 const stopTracking = async (req, res) => {
@@ -446,10 +489,227 @@ const stopTracking = async (req, res) => {
     }
 };
 
+const handleIdleActivity = async (req, res) => {
+    try {
+        const { employeeId, taskId, status, idleDuration, timestamp, idleStartTime } = req.body;
+        const authHeader = req.headers['x-agent-auth'] || req.headers['X-Agent-Auth'] || req.headers.authorization;
+
+        if (!employeeId || !status) {
+            return errorResponse(res, 'Employee ID and Status are required', 400);
+        }
+
+        // Validate and sanitize taskId
+        const validatedTaskId = (typeof taskId === 'string' && taskId.trim().length > 0)
+            ? taskId.trim()
+            : null;
+
+        // Token verification
+        if (authHeader) {
+            const raw = authHeader.startsWith('Bearer ') ? authHeader.split(' ')[1] : authHeader;
+            try {
+                const decoded = Buffer.from(raw, 'base64').toString('ascii');
+                if (!decoded.includes(employeeId) || !decoded.includes('INSIGHTFUL')) {
+                    return errorResponse(res, 'Unauthorized agent request', 401);
+                }
+            } catch (e) {
+                // Ignore base64 decode error if jwt used
+            }
+        }
+
+        // Find Employee with organization, team, and agent info
+        const employee = await prisma.employee.findUnique({
+            where: { id: employeeId },
+            include: { team: true, organization: true, agent: true }
+        });
+
+        if (!employee) {
+            return errorResponse(res, 'Employee not found', 404);
+        }
+
+        const organizationId = employee.organizationId;
+        const parsedIdleDuration = parseInt(idleDuration, 10) || 600;
+        let emailResult = null;
+
+        // Safely check if taskId exists in DB to satisfy foreign key constraint
+        let validTaskIdForDb = null;
+        if (validatedTaskId) {
+            try {
+                const taskExists = await prisma.task.findUnique({ where: { id: validatedTaskId }, select: { id: true } });
+                if (taskExists) validTaskIdForDb = taskExists.id;
+            } catch (e) {
+                // Ignore non-UUID or non-existent taskId safely
+            }
+        }
+
+        if (status === 'IDLE') {
+            // 1. Update Employee status in DB
+            await prisma.employee.update({
+                where: { id: employeeId },
+                data: { status: 'IDLE' }
+            });
+
+            // 2. Save Idle Session in ActivityLog
+            await prisma.activityLog.create({
+                data: {
+                    activityType: 'IDLE',
+                    productivity: 'UNPRODUCTIVE',
+                    duration: parsedIdleDuration,
+                    timestamp: timestamp ? new Date(timestamp) : new Date(),
+                    appWebsite: 'Away from Computer (Idle)',
+                    employeeId,
+                    taskId: validTaskIdForDb,
+                    organizationId
+                }
+            });
+
+            // 3. Find assigned Manager or Admin for Email Alert
+            let manager = null;
+            if (employee.teamId) {
+                manager = await prisma.employee.findFirst({
+                    where: { teamId: employee.teamId, role: 'MANAGER' }
+                });
+            }
+            if (!manager) {
+                manager = await prisma.employee.findFirst({
+                    where: { organizationId, role: 'MANAGER' }
+                });
+            }
+            if (!manager) {
+                const adminUser = await prisma.user.findFirst({
+                    where: { role: 'ADMIN' }
+                });
+                if (adminUser) {
+                    manager = { fullName: adminUser.name || 'Administrator', email: adminUser.email };
+                }
+            }
+
+            // 4. Send Email Notification via Nodemailer
+            try {
+                emailResult = await sendIdleAlertEmail({
+                    employee,
+                    manager,
+                    idleDuration: parsedIdleDuration,
+                    taskId: validatedTaskId,
+                    timestamp: timestamp || new Date().toISOString()
+                });
+            } catch (emailErr) {
+                console.error('[AgentController] Error sending idle notification email:', emailErr.message);
+            }
+
+            // 5. Emit Socket.IO real-time events to update Admin Dashboard
+            const io = getIO();
+            if (io && organizationId) {
+                const room = `org_${organizationId}`;
+                io.to(room).emit('employee:status', {
+                    employeeId,
+                    status: 'idle'
+                });
+                io.to(room).emit('activity:update', {
+                    employeeId,
+                    activeApp: 'Away from Computer (Idle)',
+                    idleTime: parsedIdleDuration,
+                    productivity: 'UNPRODUCTIVE',
+                    taskId: validatedTaskId,
+                    timestamp: new Date()
+                });
+                io.to(room).emit('alert:idle', {
+                    employeeId,
+                    employeeName: employee.fullName,
+                    idleDuration: parsedIdleDuration,
+                    managerEmail: manager?.email || null,
+                    timestamp: new Date()
+                });
+            }
+
+            console.log(`[AgentController] IDLE event recorded for ${employee.fullName} (${parsedIdleDuration}s). Alert email sent: ${emailResult?.sent ? 'Yes' : 'Simulated'}`);
+        } else if (status === 'RESUMED' || status === 'ACTIVE') {
+            // Employee resumed activity
+            await prisma.employee.update({
+                where: { id: employeeId },
+                data: { status: 'ACTIVE' }
+            });
+
+            const io = getIO();
+            if (io && organizationId) {
+                const room = `org_${organizationId}`;
+                io.to(room).emit('employee:status', {
+                    employeeId,
+                    status: 'online'
+                });
+                io.to(room).emit('activity:update', {
+                    employeeId,
+                    activeApp: 'Desktop Activity',
+                    idleTime: 0,
+                    productivity: 'PRODUCTIVE',
+                    taskId: validatedTaskId,
+                    timestamp: new Date()
+                });
+            }
+
+            console.log(`[AgentController] RESUMED activity event recorded for ${employee.fullName}. Employee is now ACTIVE.`);
+        }
+
+        return successResponse(res, {
+            employeeId,
+            status,
+            taskId: validatedTaskId,
+            idleDuration: parsedIdleDuration,
+            emailSent: emailResult?.sent || false,
+            simulated: emailResult?.simulated || false
+        }, `Idle activity status '${status}' processed successfully`);
+    } catch (error) {
+        console.error('handleIdleActivity error:', error);
+        return errorResponse(res, error.message || 'Failed to process idle activity', 500);
+    }
+};
+
+/**
+ * Get active projects and window-title regex patterns for auto project mapping
+ */
+const getAgentProjects = async (req, res) => {
+    try {
+        const employeeId = req.user?.employeeId;
+        if (!employeeId) return errorResponse(res, 'Employee ID is required', 400);
+
+        const employee = await prisma.employee.findUnique({
+            where: { id: employeeId },
+            select: { organizationId: true }
+        });
+
+        if (!employee) return errorResponse(res, 'Employee not found', 404);
+
+        const projects = await prisma.project.findMany({
+            where: { organizationId: employee.organizationId },
+            select: {
+                id: true,
+                name: true,
+                description: true,
+                tasks: {
+                    select: { id: true, name: true, status: true }
+                }
+            }
+        });
+
+        const mapped = projects.map(p => ({
+            id: p.id,
+            name: p.name,
+            regexPattern: `\\b${p.name.replace(/[.*+?^${}()|[\\]\\]/g, '\\$&')}\\b`,
+            tasks: p.tasks
+        }));
+
+        return successResponse(res, mapped, 'Projects for agent auto-mapping retrieved successfully');
+    } catch (error) {
+        console.error('getAgentProjects error:', error);
+        return errorResponse(res, error.message || 'Failed to retrieve projects for agent', 500);
+    }
+};
+
 module.exports = {
     register,
     heartbeat,
     logActivity,
+    handleIdleActivity,
+    getAgentProjects,
     downloadAgent,
     getVersion,
     getHealth,

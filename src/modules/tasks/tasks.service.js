@@ -79,16 +79,39 @@ class TasksService {
     }
 
     async getTasks(organizationId, filter = {}) {
-        return await prisma.task.findMany({
-            where: { 
+        let where = {};
+        if (filter.employeeId) {
+            where = {
+                employeeId: filter.employeeId
+            };
+        } else if (organizationId) {
+            where = { 
                 organizationId,
                 ...filter
-            },
+            };
+        } else {
+            where = { ...filter };
+        }
+
+        const tasks = await prisma.task.findMany({
+            where,
             include: {
                 project: true,
                 employee: true,
+                timeLogs: true,
             },
             orderBy: { createdAt: 'desc' }
+        });
+
+        return tasks.map(task => {
+            const actualSeconds = (task.timeLogs || []).reduce((acc, log) => acc + (log.duration || 0), 0);
+            const actualHours = Math.round((actualSeconds / 3600) * 10) / 10;
+            return {
+                ...task,
+                actualSeconds,
+                actualHours,
+                timeSpent: `${actualHours}h`,
+            };
         });
     }
 
@@ -546,13 +569,16 @@ class TasksService {
                 board[task.status].push({
                     id: task.id,
                     title: task.name,
-                    project: task.project.name,
+                    project: task.project?.name || 'General',
                     projectId: task.projectId,
                     priority: task.priority,
                     assignee: task.employee ? task.employee.fullName : 'Unassigned',
                     assigneeId: task.employeeId,
                     status: task.status,
-                    dueDate: task.dueDate ? task.dueDate.toISOString().split('T')[0] : 'No Date',
+                    dueDate: task.dueDate ? (typeof task.dueDate === 'string' ? task.dueDate.split('T')[0] : task.dueDate.toISOString().split('T')[0]) : 'No Date',
+                    actualSeconds: task.actualSeconds || 0,
+                    actualHours: task.actualHours || 0,
+                    timeSpent: task.timeSpent || '0h',
                     createdAt: task.createdAt
                 });
             }

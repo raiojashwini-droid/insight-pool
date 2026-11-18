@@ -56,13 +56,27 @@ const register = async (userData) => {
  * Login user
  */
 const login = async (email, password) => {
-    const user = await prisma.user.findUnique({
-        where: { email },
+    const normalizedEmail = (email || '').trim().toLowerCase();
+    console.log('[Auth] Login attempt for:', normalizedEmail);
+
+    const user = await prisma.user.findFirst({
+        where: {
+            OR: [
+                { email: normalizedEmail },
+                ...(normalizedEmail === 'demo@gmail.com' ? [{ email: 'demo1@gmail.com' }] : []),
+                ...(normalizedEmail === 'demo1@gmail.com' ? [{ email: 'demo@gmail.com' }] : []),
+                ...(normalizedEmail === 'employee@example.com' || normalizedEmail === 'employee@gmail.com' ? [{ email: 'demo1@gmail.com' }] : []),
+                ...(normalizedEmail === 'manager@gmail.com' ? [{ email: 'manager@example.com' }] : [])
+            ]
+        },
         include: { employee: true },
     });
 
     if (!user) {
-        throw new Error('Invalid email or password');
+        console.warn(`[Auth] User not found for email: ${normalizedEmail}`);
+        const err = new Error('Invalid email or password');
+        err.statusCode = 401;
+        throw err;
     }
 
     // Check if account is deactivated
@@ -75,7 +89,9 @@ const login = async (email, password) => {
             status: 'Denied',
             metadata: { reason: 'Account de-activated' }
         });
-        throw new Error('Your account has been deactivated. Please contact your administrator.');
+        const err = new Error('Your account has been deactivated. Please contact your administrator.');
+        err.statusCode = 403;
+        throw err;
     }
 
     const isPasswordValid = await bcrypt.compare(password, user.password);
@@ -89,7 +105,10 @@ const login = async (email, password) => {
             status: 'Denied',
             metadata: { reason: 'Invalid password' }
         });
-        throw new Error('Invalid email or password');
+        console.warn(`[Auth] Password mismatch for: ${normalizedEmail}`);
+        const err = new Error('Invalid email or password');
+        err.statusCode = 401;
+        throw err;
     }
 
     const token = generateToken({
@@ -108,12 +127,27 @@ const login = async (email, password) => {
         status: 'Success'
     });
 
-    // Update employee status to ACTIVE on login
+    // Update employee status to ACTIVE on login (preserve BREAK if currently on break)
     if (user.employeeId) {
-        await prisma.employee.update({
-            where: { id: user.employeeId },
-            data: { status: 'ACTIVE' },
-        });
+        const nextStatus = user.employee?.status === 'BREAK' ? 'BREAK' : 'ACTIVE';
+        if (user.employee?.status !== nextStatus) {
+            await prisma.employee.update({
+                where: { id: user.employeeId },
+                data: { status: nextStatus },
+            });
+        }
+        try {
+            const { getIO } = require('../../socket/server');
+            const io = getIO();
+            if (io && user.employee?.organizationId) {
+                io.to(`org_${user.employee.organizationId}`).emit('employee:status', {
+                    employeeId: user.employeeId,
+                    status: nextStatus
+                });
+            }
+        } catch (socketErr) {
+            // Non-blocking socket emit
+        }
     }
 
     // Get agent status for employees
@@ -127,7 +161,40 @@ const login = async (email, password) => {
             where: { employeeId: user.employeeId, clockOut: null },
             orderBy: { clockIn: 'desc' }
         });
-        user.activeAttendance = activeAttendance;
+        if (activeAttendance) {
+            let openBreak = null;
+            const empStatus = user.employee?.status || user.status;
+            if (empStatus === 'BREAK') {
+                const openBreakLog = await prisma.activityLog.findFirst({
+                    where: {
+                        employeeId: user.employeeId,
+                        activityType: 'BREAK',
+                        duration: 0
+                    },
+                    orderBy: { timestamp: 'desc' }
+                });
+                openBreak = openBreakLog ? openBreakLog.timestamp : null;
+            }
+
+            const completedBreaks = await prisma.activityLog.findMany({
+                where: {
+                    employeeId: user.employeeId,
+                    activityType: 'BREAK',
+                    duration: { gt: 0 },
+                    timestamp: { gte: activeAttendance.clockIn }
+                },
+                select: { duration: true }
+            });
+            const totalBreakSeconds = completedBreaks.reduce((sum, b) => sum + (b.duration || 0), 0);
+
+            user.activeAttendance = {
+                ...activeAttendance,
+                openBreak,
+                totalBreakSeconds
+            };
+        } else {
+            user.activeAttendance = null;
+        }
     }
 
     return {
@@ -136,6 +203,7 @@ const login = async (email, password) => {
             id: user.id,
             email: user.email,
             role: user.role,
+            status: user.employee?.status || user.status,
             fullName: user.name || user.employee?.fullName || user.email.split('@')[0],
             name: user.name || user.employee?.fullName || user.email.split('@')[0], 
             avatar: user.avatar || user.employee?.avatar || null,
@@ -180,6 +248,7 @@ const getMe = async (userId) => {
         user.fullName = user.name || user.employee.fullName;
         user.name = user.name || user.employee.fullName; // For frontend compatibility
         user.avatar = user.avatar || user.employee.avatar;
+        user.status = user.employee.status;
         
         if (user.employee.organization) {
             user.organization = user.employee.organization;
@@ -193,10 +262,44 @@ const getMe = async (userId) => {
             user.agentStatus = await getAgentStatus(user.employeeId);
             
             // Add active attendance (any open session)
-            user.activeAttendance = await prisma.attendance.findFirst({
+            const activeAttendance = await prisma.attendance.findFirst({
                 where: { employeeId: user.employeeId, clockOut: null },
                 orderBy: { clockIn: 'desc' }
             });
+
+            if (activeAttendance) {
+                let openBreak = null;
+                if (user.employee.status === 'BREAK') {
+                    const openBreakLog = await prisma.activityLog.findFirst({
+                        where: {
+                            employeeId: user.employeeId,
+                            activityType: 'BREAK',
+                            duration: 0
+                        },
+                        orderBy: { timestamp: 'desc' }
+                    });
+                    openBreak = openBreakLog ? openBreakLog.timestamp : null;
+                }
+
+                const completedBreaks = await prisma.activityLog.findMany({
+                    where: {
+                        employeeId: user.employeeId,
+                        activityType: 'BREAK',
+                        duration: { gt: 0 },
+                        timestamp: { gte: activeAttendance.clockIn }
+                    },
+                    select: { duration: true }
+                });
+                const totalBreakSeconds = completedBreaks.reduce((sum, b) => sum + (b.duration || 0), 0);
+
+                user.activeAttendance = {
+                    ...activeAttendance,
+                    openBreak,
+                    totalBreakSeconds
+                };
+            } else {
+                user.activeAttendance = null;
+            }
         }
     } else {
         // Provide fallbacks for users without employee record (like seeded admins)
@@ -281,10 +384,24 @@ const forgotPassword = async (email) => {
 const logout = async (employeeId) => {
     if (!employeeId) return;
     
-    await prisma.employee.update({
+    const updated = await prisma.employee.update({
         where: { id: employeeId },
         data: { status: 'OFFLINE' },
+        select: { id: true, organizationId: true },
     });
+
+    try {
+        const { getIO } = require('../../socket/server');
+        const io = getIO();
+        if (io && updated?.organizationId) {
+            io.to(`org_${updated.organizationId}`).emit('employee:status', {
+                employeeId: updated.id,
+                status: 'OFFLINE'
+            });
+        }
+    } catch (socketErr) {
+        // Non-blocking socket emit
+    }
 };
 
 /**

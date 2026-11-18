@@ -1,9 +1,13 @@
 const jiraConnector = require('./JiraConnector');
 const clickupConnector = require('./ClickUpConnector');
+const gitlabConnector = require('./GitLabConnector');
+const githubConnector = require('./GitHubConnector');
 
 const connectors = {
     jira: jiraConnector,
     clickup: clickupConnector,
+    gitlab: gitlabConnector,
+    github: githubConnector,
 };
 
 /**
@@ -21,6 +25,8 @@ function getConnector(providerName) {
 module.exports = {
     jiraConnector,
     clickupConnector,
+    gitlabConnector,
+    githubConnector,
     getConnector,
     supportedProviders: Object.keys(connectors),
 };

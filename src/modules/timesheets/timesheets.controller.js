@@ -1,6 +1,8 @@
 const timesheetsService = require('./timesheets.service');
 const { successResponse, errorResponse } = require('../../utils/response');
 const { getOrganizationId } = require('../../utils/orgId');
+const { isValidDate } = require('../../utils/timesheetCalc');
+const prisma = require('../../config/db');
 
 const timesheetsController = {
     /**
@@ -17,6 +19,11 @@ const timesheetsController = {
                 overtimeMultiplier: req.query.overtime_multiplier
             };
 
+            // Fix 2: Validate week_start format before date conversion
+            if (weekStart && !isValidDate(weekStart)) {
+                return errorResponse(res, `Invalid week_start date format: "${weekStart}". Expected valid date (e.g. YYYY-MM-DD)`, 400);
+            }
+
             if (role === 'EMPLOYEE') {
                 if (!employeeId) {
                     return errorResponse(res, 'User profile is not linked to an employee record', 400);
@@ -25,9 +32,33 @@ const timesheetsController = {
                 return successResponse(res, timesheet, 'Weekly timesheet fetched successfully');
             }
 
-            // Manager or Admin
+            // Fix 1: Manager or Admin querying single employee
             if (req.query.employee_id) {
-                const timesheet = await timesheetsService.getWeeklyTimesheet(organizationId, req.query.employee_id, weekStart, options);
+                const targetEmployeeId = req.query.employee_id;
+
+                // Validate target employee exists within organization (prevent cross-organization access)
+                const targetEmployee = await prisma.employee.findFirst({
+                    where: { id: targetEmployeeId, organizationId },
+                    select: { id: true, teamId: true }
+                });
+
+                if (!targetEmployee) {
+                    return errorResponse(res, 'Employee not found in organization', 404);
+                }
+
+                // If requester is a Manager, enforce team-level authorization
+                if (role === 'MANAGER') {
+                    const manager = await prisma.employee.findUnique({
+                        where: { id: employeeId },
+                        select: { teamId: true }
+                    });
+
+                    if (!manager?.teamId || manager.teamId !== targetEmployee.teamId) {
+                        return errorResponse(res, 'Access denied: You can only access timesheets for employees in your assigned team', 403);
+                    }
+                }
+
+                const timesheet = await timesheetsService.getWeeklyTimesheet(organizationId, targetEmployeeId, weekStart, options);
                 return successResponse(res, timesheet, 'Weekly timesheet fetched successfully');
             }
 
@@ -39,7 +70,8 @@ const timesheetsController = {
             );
             return successResponse(res, allTimesheets, 'Weekly timesheets fetched successfully');
         } catch (error) {
-            return errorResponse(res, error.message, 500);
+            const status = error.statusCode || (error.message?.includes('Invalid date') ? 400 : 500);
+            return errorResponse(res, error.message, status);
         }
     },
 
@@ -51,6 +83,11 @@ const timesheetsController = {
             const organizationId = await getOrganizationId(req);
             const { role, employeeId: userEmployeeId } = req.user;
             const { week_start, employee_id } = req.body || {};
+
+            // Fix 2: Validate week_start format
+            if (week_start && !isValidDate(week_start)) {
+                return errorResponse(res, `Invalid week_start date format: "${week_start}". Expected valid date (e.g. YYYY-MM-DD)`, 400);
+            }
 
             let targetEmployeeId = userEmployeeId;
             if (role === 'ADMIN' && employee_id) {
@@ -180,6 +217,11 @@ const timesheetsController = {
                 return errorResponse(res, 'Access denied: Admin or Manager permission required', 403);
             }
 
+            const rawWeekStart = req.query.week_start;
+            if (rawWeekStart && !isValidDate(rawWeekStart)) {
+                return errorResponse(res, `Invalid week_start date format: "${rawWeekStart}". Expected valid date (e.g. YYYY-MM-DD)`, 400);
+            }
+
             const options = {
                 teamId: req.query.team_id,
                 overtimeThreshold: req.query.overtime_threshold,
@@ -188,7 +230,7 @@ const timesheetsController = {
 
             const { csvContent, weekStart } = await timesheetsService.exportPayrollCsv(
                 organizationId,
-                req.query.week_start,
+                rawWeekStart,
                 req.user,
                 options
             );
@@ -197,7 +239,8 @@ const timesheetsController = {
             res.setHeader('Content-Disposition', `attachment; filename="payroll-${weekStart}.csv"`);
             return res.status(200).send(csvContent);
         } catch (error) {
-            return errorResponse(res, error.message, 500);
+            const status = error.statusCode || (error.message?.includes('Invalid date') ? 400 : 500);
+            return errorResponse(res, error.message, status);
         }
     },
 

@@ -1,9 +1,11 @@
 const organizationService = require('./organization.service');
 const { organizationSchema } = require('./organization.validation');
+const { getOrganizationId } = require('../../utils/orgId');
 
 const getOrganization = async (req, res, next) => {
     try {
-        const org = await organizationService.getOrganization();
+        const orgId = req.user?.organizationId || await getOrganizationId(req);
+        const org = await organizationService.getOrganization(orgId);
         res.status(200).json({
             success: true,
             data: org

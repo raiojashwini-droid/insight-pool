@@ -581,8 +581,10 @@ const timesheetsService = {
     isPeriodLocked: async (organizationId, employeeId, targetDate) => {
         if (!targetDate || !employeeId) return false;
         try {
-            const d = new Date(targetDate);
-            const weekStart = mondayOf(d);
+            const d = typeof targetDate === 'string' && !targetDate.includes('T') ? `${targetDate}T00:00:00Z` : targetDate;
+            const parsed = new Date(d);
+            if (isNaN(parsed.getTime())) return false;
+            const weekStart = mondayOf(parsed);
 
             const approvedTimesheet = await prisma.timesheet.findUnique({
                 where: {

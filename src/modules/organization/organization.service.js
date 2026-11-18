@@ -2,14 +2,24 @@ const { PrismaClient } = require('@prisma/client');
 const prisma = new PrismaClient();
 
 class OrganizationService {
-    async getOrganization() {
-        // Since it's a single organization SaaS for now, we get the first one
-        // In a multi-tenant app, we'd filter by ID from session/user
-        let org = await prisma.organization.findFirst({
-            include: {
-                complianceSetting: true
-            }
-        });
+    async getOrganization(orgId) {
+        let org = null;
+        if (orgId) {
+            org = await prisma.organization.findUnique({
+                where: { id: orgId },
+                include: {
+                    complianceSetting: true
+                }
+            });
+        }
+
+        if (!org) {
+            org = await prisma.organization.findFirst({
+                include: {
+                    complianceSetting: true
+                }
+            });
+        }
 
         if (!org) {
             // Create a default one if none exists (for development)

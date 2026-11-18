@@ -8,30 +8,12 @@ const ROOT_PUBLIC_DIR = path.join(__dirname, '../../public');
 const SCREENSHOT_UPLOAD_DIR = path.join(ROOT_PUBLIC_DIR, 'uploads/screenshots');
 
 function isCloudinaryConfigured() {
-    const cloudName = (process.env.CLOUDINARY_CLOUD_NAME || '').trim();
-    const apiKey = (process.env.CLOUDINARY_API_KEY || '').trim();
-    const apiSecret = (process.env.CLOUDINARY_API_SECRET || '').trim();
+    const cloudName = process.env.CLOUDINARY_CLOUD_NAME;
+    const apiKey = process.env.CLOUDINARY_API_KEY;
+    const apiSecret = process.env.CLOUDINARY_API_SECRET;
 
     if (!cloudName || !apiKey || !apiSecret) return false;
-
-    // Filter out dummy/placeholder values from .env.example
-    const placeholders = [
-        'your_cloud_name',
-        'your_api_key',
-        'your_api_secret',
-        'your_cloud_name_here',
-        'your_api_key_here',
-        'your_api_secret_here'
-    ];
-
-    if (
-        placeholders.includes(cloudName.toLowerCase()) ||
-        placeholders.includes(apiKey.toLowerCase()) ||
-        placeholders.includes(apiSecret.toLowerCase())
-    ) {
-        return false;
-    }
-
+    if (apiKey.includes('your_') || cloudName.includes('your_') || apiSecret.includes('your_')) return false;
     return true;
 }
 
@@ -108,7 +90,7 @@ async function uploadImageBuffer(buffer, options = {}) {
                 storage: 'cloudinary'
             };
         } catch (cloudErr) {
-            console.warn('[ImageStorage] Cloudinary upload failed, falling back to local storage:', cloudErr.message);
+            console.warn('[imageStorage] Cloudinary upload failed, falling back to local disk storage:', cloudErr.message);
         }
     }
 

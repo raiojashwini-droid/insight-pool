@@ -6,6 +6,7 @@ const roleMiddleware = require('../../middlewares/role.middleware');
 
 router.get('/', authMiddleware, employeesController.getEmployees);
 router.get('/:id', authMiddleware, employeesController.getEmployeeById);
+router.post('/', authMiddleware, roleMiddleware(['ADMIN', 'MANAGER']), employeesController.inviteEmployee);
 router.post('/invite', authMiddleware, roleMiddleware(['ADMIN', 'MANAGER']), employeesController.inviteEmployee);
 router.put('/:id', authMiddleware, roleMiddleware(['ADMIN', 'MANAGER']), employeesController.updateEmployee);
 router.delete('/:id', authMiddleware, roleMiddleware(['ADMIN']), employeesController.deleteEmployee);
