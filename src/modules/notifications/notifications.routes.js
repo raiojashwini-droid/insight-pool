@@ -6,6 +6,7 @@ const authMiddleware = require('../../middlewares/auth.middleware');
 router.use(authMiddleware);
 
 router.get('/', notificationsController.getNotifications);
+router.post('/', notificationsController.createNotification);
 router.patch('/mark-all-read', notificationsController.markAllAsRead);
 router.delete('/delete-all', notificationsController.deleteAllNotifications);
 router.patch('/:id/read', notificationsController.markAsRead);

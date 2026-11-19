@@ -8,11 +8,14 @@ const getEmployees = async (req, res, next) => {
         const orgId = await getOrganizationId(req);
         const { role, employeeId: currentEmployeeId } = req.user;
 
-        let filter = { role: 'EMPLOYEE' };
+        let filter = {};
         if (role === 'EMPLOYEE') {
-            // Employees see only themselves (and they should have role EMPLOYEE anyway)
-            filter.id = currentEmployeeId;
+            // Employees see only themselves
+            filter = { id: currentEmployeeId };
+        } else if (role === 'MANAGER') {
+            filter = { role: 'EMPLOYEE' };
         }
+        // ADMIN sees all members in the organization
 
         const employees = await employeesService.getEmployees(orgId, filter);
 
@@ -92,6 +95,13 @@ const getEmployeeById = async (req, res, next) => {
             });
         }
 
+        if (req.user.role === 'MANAGER' && employee.role === 'ADMIN') {
+            return res.status(403).json({
+                success: false,
+                message: "Access denied: You cannot view admin profile"
+            });
+        }
+
         const formattedEmployee = {
             ...employee,
             name: employee.fullName,
@@ -139,7 +149,8 @@ const inviteEmployee = async (req, res, next) => {
                     validatedData.email,
                     role,
                     validatedData.organizationId,
-                    validatedData.fullName
+                    validatedData.fullName,
+                    employee.id
                 );
                 inviteResult = { setupLink };
             }

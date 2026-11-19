@@ -32,13 +32,30 @@ class ComplianceController {
             const logs = await complianceService.getAuditLogs(organizationId, search);
             
             // Format logs to match frontend expectations
-            const formattedLogs = logs.map(log => ({
-                id: log.id,
-                action: log.action,
-                user: log.user?.email || 'System',
-                time: log.createdAt,
-                status: log.status
-            }));
+            const formattedLogs = logs.map(log => {
+                let parsedMetadata = {};
+                if (typeof log.metadata === 'string') {
+                    try { parsedMetadata = JSON.parse(log.metadata); } catch (e) { parsedMetadata = {}; }
+                } else if (log.metadata && typeof log.metadata === 'object') {
+                    parsedMetadata = log.metadata;
+                }
+
+                const displayName = log.user?.fullName || log.user?.email || 'System Administrator';
+
+                return {
+                    id: log.id,
+                    action: log.action,
+                    user: displayName,
+                    userName: displayName,
+                    time: log.createdAt,
+                    createdAt: log.createdAt,
+                    dateTime: log.createdAt,
+                    status: log.status,
+                    ipAddress: log.ipAddress || '127.0.0.1',
+                    metadata: parsedMetadata,
+                    userRole: parsedMetadata?.userRole || 'Admin'
+                };
+            });
 
             return successResponse(res, formattedLogs, 'Audit logs retrieved successfully');
         } catch (error) {

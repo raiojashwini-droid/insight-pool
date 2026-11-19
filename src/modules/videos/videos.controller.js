@@ -76,9 +76,20 @@ const videosController = {
                     sizeMb,
                 },
                 include: {
-                    employee: { select: { id: true, fullName: true } },
+                    employee: { select: { id: true, fullName: true, avatar: true } },
                 },
             });
+
+            // Real-time broadcast to admin and managers
+            try {
+                const { getIO } = require('../../socket/server');
+                const io = getIO();
+                if (io) {
+                    io.to(`org_${organizationId}`).emit('video:new', record);
+                }
+            } catch (sockErr) {
+                console.warn('[VideosController] Socket broadcast error:', sockErr.message);
+            }
 
             return successResponse(res, record, 'Video recording uploaded successfully');
         } catch (error) {
@@ -165,6 +176,18 @@ const videosController = {
             }
 
             await prisma.videoRecording.delete({ where: { id } });
+
+            // Real-time broadcast deletion
+            try {
+                const { getIO } = require('../../socket/server');
+                const io = getIO();
+                if (io) {
+                    io.to(`org_${video.organizationId}`).emit('video:deleted', { id });
+                }
+            } catch (sockErr) {
+                console.warn('[VideosController] Socket broadcast error:', sockErr.message);
+            }
+
             return successResponse(res, null, 'Video deleted successfully');
         } catch (error) {
             console.error('[VideosController] Error deleting video:', error);

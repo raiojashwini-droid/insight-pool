@@ -39,7 +39,7 @@ class TasksController {
                 filter.employeeId = effectiveEmployeeId;
             }
 
-            const tasks = await tasksService.getTasks(organizationId, filter);
+            const tasks = await tasksService.getTasks(organizationId, filter, req.user);
             return successResponse(res, tasks, 'Tasks retrieved successfully');
         } catch (error) {
             return errorResponse(res, error.message);
@@ -67,7 +67,7 @@ class TasksController {
                 filter.employeeId = effectiveEmployeeId;
             }
 
-            const board = await tasksService.getBoardTasks(organizationId, filter);
+            const board = await tasksService.getBoardTasks(organizationId, filter, req.user);
             return successResponse(res, board, 'Board tasks retrieved successfully');
         } catch (error) {
             return errorResponse(res, error.message);
@@ -217,15 +217,30 @@ class TasksController {
     async getCycleTimeAnalytics(req, res) {
         try {
             const organizationId = await getOrganizationId(req);
+            let { role, employeeId: userEmployeeId, userId } = req.user;
             const { projectId, employeeId, status, startDate, endDate } = req.query;
+
+            let effectiveEmployeeId = (employeeId && employeeId !== 'null' && employeeId !== 'undefined') ? employeeId : userEmployeeId;
+            if (!effectiveEmployeeId && role === 'EMPLOYEE') {
+                const user = await require('../../config/db').user.findUnique({
+                    where: { id: userId },
+                    select: { employeeId: true }
+                });
+                effectiveEmployeeId = user?.employeeId;
+            }
+
             const filter = {};
             if (projectId) filter.projectId = projectId;
-            if (employeeId) filter.employeeId = employeeId;
+            if (role === 'EMPLOYEE') {
+                filter.employeeId = effectiveEmployeeId;
+            } else if (employeeId) {
+                filter.employeeId = employeeId;
+            }
             if (status) filter.status = status;
             if (startDate) filter.startDate = startDate;
             if (endDate) filter.endDate = endDate;
 
-            const analytics = await tasksService.getCycleTimeAnalytics(organizationId, filter);
+            const analytics = await tasksService.getCycleTimeAnalytics(organizationId, filter, req.user);
             return successResponse(res, analytics, 'Cycle time and bottleneck analytics retrieved successfully');
         } catch (error) {
             console.error('Cycle time analytics error:', error);

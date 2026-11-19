@@ -1,6 +1,28 @@
 const prisma = require('../../config/db');
 
 const notificationsService = {
+    createNotification: async (organizationId, { title, description, type = 'info', targetUserId, link, metadata } = {}) => {
+        if (!organizationId || !title) return null;
+        try {
+            const notif = await prisma.notification.create({
+                data: {
+                    organizationId,
+                    title,
+                    description: description || null,
+                    type: type || 'info',
+                    targetUserId: targetUserId || null,
+                    link: link || null,
+                    metadata: metadata ? (typeof metadata === 'string' ? metadata : JSON.stringify(metadata)) : null,
+                    unread: true
+                }
+            });
+            return notif;
+        } catch (err) {
+            console.error('Error creating notification in DB:', err);
+            return null;
+        }
+    },
+
     getNotifications: async (organizationId, { unreadOnly = false, type, limit = 50, offset = 0, role = 'ADMIN', userId, employeeId } = {}) => {
         const isManager = role === 'ADMIN' || role === 'MANAGER';
         const where = {
@@ -11,7 +33,7 @@ const notificationsService = {
                 OR: [
                     ...(userId ? [{ targetUserId: userId }] : []),
                     ...(employeeId ? [{ targetUserId: employeeId }] : []),
-                    { type: 'info', targetUserId: null }
+                    { targetUserId: null }
                 ]
             } : {})
         };

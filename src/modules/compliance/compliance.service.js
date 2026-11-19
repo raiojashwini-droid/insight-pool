@@ -61,16 +61,24 @@ class ComplianceService {
     }
 
     async getAuditLogs(organizationId, search = '') {
+        const orgCondition = organizationId && organizationId !== 'default-org-id'
+            ? { in: [organizationId, 'default-org-id'] }
+            : (organizationId || 'default-org-id');
+
         const whereClause = {
-            organizationId,
+            organizationId: orgCondition,
         };
 
         if (search) {
-            whereClause.OR = [
-                { action: { contains: search } },
-                { status: { contains: search } },
-                { user: { fullName: { contains: search } } },
-                { user: { email: { contains: search } } }
+            whereClause.AND = [
+                {
+                    OR: [
+                        { action: { contains: search } },
+                        { status: { contains: search } },
+                        { user: { fullName: { contains: search } } },
+                        { user: { email: { contains: search } } }
+                    ]
+                }
             ];
         }
 

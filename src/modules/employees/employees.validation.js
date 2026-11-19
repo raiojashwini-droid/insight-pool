@@ -15,6 +15,7 @@ const inviteEmployeeSchema = z.object({
 
 const updateEmployeeSchema = z.object({
     fullName: z.string().optional(),
+    role: z.enum(['ADMIN', 'MANAGER', 'EMPLOYEE']).optional(),
     teamId: z.string().optional().nullable(),
     location: z.string().optional(),
     status: z.enum(['INVITED', 'ACTIVE', 'OFFLINE', 'IDLE', 'DEACTIVATED', 'MERGED']).optional(),

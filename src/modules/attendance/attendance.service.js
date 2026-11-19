@@ -17,7 +17,7 @@ const attendanceService = {
         // Set today to noon to prevent timezone shifts from changing the calendar date in MySQL
         const today = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 12, 0, 0);
 
-        // Check if there is already an active (unclosed) session - search for ANY active session for this employee
+        // Check if there is an active (unclosed) session - auto-close previous open session if re-clocking in
         const active = await prisma.attendance.findFirst({
             where: {
                 employeeId,
@@ -27,17 +27,38 @@ const attendanceService = {
         });
         
         if (active) {
-            throw new Error('Already clocked in (active session exists)');
+            console.log(`[Attendance] Auto-closing previous unclosed session ${active.id} for employee ${employeeId}`);
+            const prevClockIn = new Date(active.clockIn);
+            const durationSec = Math.max(0, Math.floor((now.getTime() - prevClockIn.getTime()) / 1000));
+            const cappedDuration = Math.min(durationSec, 8 * 3600);
+            await prisma.attendance.update({
+                where: { id: active.id },
+                data: {
+                    clockOut: new Date(prevClockIn.getTime() + cappedDuration * 1000),
+                    duration: cappedDuration
+                }
+            });
         }
 
-        // Guard: Prevent clocking in if this period's timesheet is already approved and locked
+        // Guard: Prevent clocking in if a PAST period's timesheet is already approved and locked
         try {
             const timesheetsService = require('../timesheets/timesheets.service');
+            const currentWeekMonday = timesheetsService.getMondayOf(now);
             const isLocked = await timesheetsService.isPeriodLocked(organizationId, employeeId, today);
             if (isLocked) {
-                const err = new Error('Cannot clock in: The timesheet for this period has already been approved and locked');
-                err.statusCode = 409;
-                throw err;
+                const weekStartOfToday = timesheetsService.getMondayOf(today);
+                // If this is the current active week, auto-reopen to DRAFT so employee can clock in and work
+                if (weekStartOfToday === currentWeekMonday) {
+                    await prisma.timesheet.updateMany({
+                        where: { organizationId, employeeId, weekStart: weekStartOfToday, status: 'APPROVED' },
+                        data: { status: 'DRAFT' }
+                    });
+                    console.log(`[AttendanceService] Reopened current week's approved timesheet to DRAFT for clock-in: ${employeeId}`);
+                } else {
+                    const err = new Error('Cannot clock in: The timesheet for this past period has already been approved and locked');
+                    err.statusCode = 409;
+                    throw err;
+                }
             }
         } catch (lErr) {
             if (lErr.statusCode === 409) throw lErr;
@@ -99,8 +120,7 @@ const attendanceService = {
                     productivity: 'PRODUCTIVE',
                     duration: 0,
                     timestamp: now,
-                    appWebsite: 'Work Session',
-                    title: 'Active Work Session'
+                    appWebsite: 'Work Session'
                 }
             });
         } catch (actErr) {
@@ -120,6 +140,24 @@ const attendanceService = {
         if (io) {
             io.to(`org_${organizationId}`).emit('attendance:update', { employeeId, type: 'clock-in' });
             io.to(`org_${organizationId}`).emit('employee:status', { employeeId, status: 'ACTIVE' });
+        }
+
+        // Persist notification for attendance event
+        try {
+            const empUser = await prisma.employee.findUnique({ where: { id: employeeId }, include: { user: true } });
+            const empName = empUser?.user?.name || `Employee ${empUser?.employeeCode || employeeId}`;
+            await prisma.notification.create({
+                data: {
+                    organizationId,
+                    title: 'Work session started',
+                    description: `${empName} clocked in`,
+                    type: 'success',
+                    targetUserId: empUser?.userId || null,
+                    unread: true
+                }
+            });
+        } catch (ne) {
+            console.error('[AttendanceService] Notification create error on clock-in:', ne.message);
         }
 
         // Evaluate Late Arrival Alert in background (non-blocking)
@@ -236,25 +274,45 @@ const attendanceService = {
             io.to(`org_${attendance.organizationId}`).emit('employee:status', { employeeId, status: 'OFFLINE' });
         }
 
+        // Persist notification for clock-out
+        try {
+            const empUser = await prisma.employee.findUnique({ where: { id: employeeId }, include: { user: true } });
+            const empName = empUser?.user?.name || `Employee ${empUser?.employeeCode || employeeId}`;
+            await prisma.notification.create({
+                data: {
+                    organizationId: attendance.organizationId,
+                    title: 'Work session ended',
+                    description: `${empName} clocked out`,
+                    type: 'info',
+                    targetUserId: empUser?.userId || null,
+                    unread: true
+                }
+            });
+        } catch (ne) {
+            console.error('[AttendanceService] Notification create error on clock-out:', ne.message);
+        }
+
         return updatedAttendance;
     },
 
     getTimesheets: async (organizationId, filters = {}) => {
         const where = {
-            organizationId,
-            employee: {
-                role: 'EMPLOYEE'
-            }
+            organizationId
         };
 
+        const roleFilter = filters.role ? filters.role : { not: 'ADMIN' };
+        where.employee = { role: roleFilter };
         if (filters.employeeId) where.employeeId = filters.employeeId;
-        if (filters.teamId) where.employee = { ...where.employee, teamId: filters.teamId };
+        if (filters.teamId) where.employee = { ...(where.employee || {}), teamId: filters.teamId };
         if (filters.startDate && filters.endDate) {
             const start = new Date(filters.startDate);
             start.setHours(0, 0, 0, 0);
             const end = new Date(filters.endDate);
             end.setHours(23, 59, 59, 999);
-            where.date = { gte: start, lte: end };
+            where.OR = [
+                { date: { gte: start, lte: end } },
+                { clockIn: { gte: start, lte: end } }
+            ];
         }
 
         return await prisma.attendance.findMany({
@@ -264,6 +322,7 @@ const attendanceService = {
                     select: {
                         fullName: true,
                         location: true,
+                        role: true,
                         teamId: true,
                         team: {
                             select: { name: true, description: true },
@@ -280,19 +339,21 @@ const attendanceService = {
      */
     getTimesheetsGrouped: async (organizationId, filters = {}) => {
         const where = {
-            organizationId,
-            employee: {
-                role: 'EMPLOYEE'
-            }
+            organizationId
         };
+        const roleFilter = filters.role ? filters.role : { not: 'ADMIN' };
+        where.employee = { role: roleFilter };
         if (filters.employeeId) where.employeeId = filters.employeeId;
-        if (filters.teamId) where.employee = { ...where.employee, teamId: filters.teamId };
+        if (filters.teamId) where.employee = { ...(where.employee || {}), teamId: filters.teamId };
         if (filters.startDate && filters.endDate) {
             const start = new Date(filters.startDate);
             start.setHours(0, 0, 0, 0);
             const end = new Date(filters.endDate);
             end.setHours(23, 59, 59, 999);
-            where.date = { gte: start, lte: end };
+            where.OR = [
+                { date: { gte: start, lte: end } },
+                { clockIn: { gte: start, lte: end } }
+            ];
         }
 
         const records = await prisma.attendance.findMany({
@@ -302,6 +363,7 @@ const attendanceService = {
                     select: {
                         fullName: true,
                         location: true,
+                        role: true,
                         teamId: true,
                         team: { select: { name: true, description: true } },
                     },
@@ -617,6 +679,24 @@ const attendanceService = {
                 io.to(`org_${organizationId}`).emit('employee:status', { employeeId, status: 'BREAK' });
             }
 
+            // Persist notification for start break
+            try {
+                const empUser = await prisma.employee.findUnique({ where: { id: employeeId }, include: { user: true } });
+                const empName = empUser?.user?.name || `Employee ${empUser?.employeeCode || employeeId}`;
+                await prisma.notification.create({
+                    data: {
+                        organizationId,
+                        title: 'Break started',
+                        description: `${empName} started a break`,
+                        type: 'warning',
+                        targetUserId: empUser?.userId || null,
+                        unread: true
+                    }
+                });
+            } catch (ne) {
+                console.error('[AttendanceService] Notification create error on break-start:', ne.message);
+            }
+
             return { ...log, openBreak: log.timestamp };
         } catch (error) {
             console.error('[AttendanceService] startBreak Error:', error);
@@ -701,6 +781,23 @@ const attendanceService = {
             if (io) {
                 io.to(`org_${employee.organizationId}`).emit('attendance:update', { employeeId, type: 'break-end' });
                 io.to(`org_${employee.organizationId}`).emit('employee:status', { employeeId, status: 'ACTIVE' });
+            }
+
+            // Persist notification for end break
+            try {
+                const empName = employee?.user?.name || `Employee ${employee?.employeeCode || employeeId}`;
+                await prisma.notification.create({
+                    data: {
+                        organizationId: employee.organizationId,
+                        title: 'Break ended',
+                        description: `${empName} resumed work`,
+                        type: 'success',
+                        targetUserId: employee?.userId || null,
+                        unread: true
+                    }
+                });
+            } catch (ne) {
+                console.error('[AttendanceService] Notification create error on break-end:', ne.message);
             }
 
             return { success: true, duration };

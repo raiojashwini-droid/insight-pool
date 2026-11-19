@@ -196,7 +196,7 @@ const heartbeat = async (req, res) => {
         }
 
         // Check if Approved
-        if (agent.status !== 'active') {
+        if (agent.status === 'rejected' || agent.status === 'pending') {
             return errorResponse(res, 'Agent is not approved. Please contact admin.', 403);
         }
 
@@ -250,7 +250,7 @@ const logActivity = async (req, res) => {
             });
         }
 
-        if (agent.status !== 'active') {
+        if (agent.status === 'rejected' || agent.status === 'pending') {
             return errorResponse(res, 'Agent is not active or approved', 403);
         }
 
@@ -351,18 +351,23 @@ const getHealth = async (req, res) => {
     return successResponse(res, { status: 'healthy' }, 'Agent health checked successfully');
 };
 
+const GITHUB_AGENT_DOWNLOAD_URL = 'https://raw.githubusercontent.com/ashilata62/employee-monitoring/main/employee-monitoirng-backend/public/agent/EMS-Tracker-latest.exe';
+
 const downloadAgent = async (req, res) => {
     try {
-        const filePath = path.join(__dirname, '../../../public/agent/EMS-Tracker-latest.exe');
+        const primaryPath = path.join(__dirname, '../../../public/agent/EMS-Tracker-latest.exe');
+        const altPath = path.join(__dirname, '../../../public/agent/Insightful Agent Setup 1.0.2.exe');
+        const targetPath = fs.existsSync(primaryPath) ? primaryPath : (fs.existsSync(altPath) ? altPath : null);
         
-        if (!fs.existsSync(filePath)) {
-            return errorResponse(res, 'Agent installer not found. Please contact administrator.', 404);
+        if (targetPath) {
+            return res.download(targetPath, 'EMS-Tracker-latest.exe');
         }
         
-        res.download(filePath, 'EMS-Tracker-latest.exe');
+        // If executable not present in local container disk, redirect to GitHub global CDN
+        return res.redirect(GITHUB_AGENT_DOWNLOAD_URL);
     } catch (error) {
         console.error('Agent download error:', error);
-        return errorResponse(res, 'Failed to download agent', 500);
+        return res.redirect(GITHUB_AGENT_DOWNLOAD_URL);
     }
 };
 
@@ -491,7 +496,7 @@ const stopTracking = async (req, res) => {
 
 const handleIdleActivity = async (req, res) => {
     try {
-        const { employeeId, taskId, status, idleDuration, timestamp, idleStartTime } = req.body;
+        const { employeeId, taskId, status, idleDuration, timestamp, idleStartTime, source } = req.body;
         const authHeader = req.headers['x-agent-auth'] || req.headers['X-Agent-Auth'] || req.headers.authorization;
 
         if (!employeeId || !status) {
@@ -503,16 +508,37 @@ const handleIdleActivity = async (req, res) => {
             ? taskId.trim()
             : null;
 
-        // Token verification
+        // Token verification (supports both Desktop Agent Base64 token and Web Browser JWT token)
         if (authHeader) {
             const raw = authHeader.startsWith('Bearer ') ? authHeader.split(' ')[1] : authHeader;
+            let isAuthorized = false;
+
+            // 1. Check if Desktop Agent token
             try {
                 const decoded = Buffer.from(raw, 'base64').toString('ascii');
-                if (!decoded.includes(employeeId) || !decoded.includes('INSIGHTFUL')) {
-                    return errorResponse(res, 'Unauthorized agent request', 401);
+                if (decoded.includes('INSIGHTFUL') && decoded.includes(employeeId)) {
+                    isAuthorized = true;
                 }
-            } catch (e) {
-                // Ignore base64 decode error if jwt used
+            } catch (e) {}
+
+            // 2. Check if valid JWT (Web browser session)
+            if (!isAuthorized) {
+                try {
+                    const { verifyToken } = require('../../utils/jwt');
+                    const jwtUser = verifyToken(raw);
+                    if (jwtUser) {
+                        isAuthorized = true;
+                    }
+                } catch (jwtErr) {}
+            }
+
+            // 3. Allow WEB_AGENT source
+            if (!isAuthorized && source === 'WEB_AGENT') {
+                isAuthorized = true;
+            }
+
+            if (!isAuthorized) {
+                return errorResponse(res, 'Unauthorized agent request', 401);
             }
         }
 
@@ -527,7 +553,11 @@ const handleIdleActivity = async (req, res) => {
         }
 
         const organizationId = employee.organizationId;
-        const parsedIdleDuration = parseInt(idleDuration, 10) || 600;
+        const parsedIdleDuration = parseInt(idleDuration, 10) || 0;
+        const now = new Date();
+        const io = getIO();
+        const room = organizationId ? `org_${organizationId}` : null;
+        const effectiveSource = source || 'DESKTOP_AGENT';
         let emailResult = null;
 
         // Safely check if taskId exists in DB to satisfy foreign key constraint
@@ -541,20 +571,71 @@ const handleIdleActivity = async (req, res) => {
             }
         }
 
-        if (status === 'IDLE') {
-            // 1. Update Employee status in DB
-            await prisma.employee.update({
-                where: { id: employeeId },
-                data: { status: 'IDLE' }
+        if (status === 'PASSIVE') {
+            // Initial 1-min inactivity detection
+            if (io && room) {
+                io.to(room).emit('employee:status', {
+                    employeeId,
+                    status: 'passive',
+                    idleDuration: parsedIdleDuration,
+                    lastActiveAt: employee.lastActiveAt || now
+                });
+            }
+        } else if (status === 'IDLE_WARNING') {
+            // 5-min warning threshold reached
+            if (io && room) {
+                io.to(room).emit('employee:status', {
+                    employeeId,
+                    status: 'idle_warning',
+                    idleDuration: parsedIdleDuration,
+                    idleStartTime: idleStartTime ? new Date(idleStartTime) : now
+                });
+            }
+        } else if (status === 'IDLE') {
+            // 10-min idle threshold reached
+            const parsedStartTime = idleStartTime
+                ? new Date(idleStartTime)
+                : new Date(now.getTime() - parsedIdleDuration * 1000);
+
+            // 1. Check if an open idle session already exists
+            let openSession = await prisma.idleSession.findFirst({
+                where: { employeeId, idleEndTime: null },
+                orderBy: { createdAt: 'desc' }
             });
 
-            // 2. Save Idle Session in ActivityLog
+            if (!openSession) {
+                openSession = await prisma.idleSession.create({
+                    data: {
+                        employeeId,
+                        organizationId,
+                        activityStatus: 'IDLE',
+                        lastActivityAt: employee.lastActiveAt || parsedStartTime,
+                        idleStartTime: parsedStartTime,
+                        idleDuration: parsedIdleDuration,
+                        notificationType: 'IDLE_ALERT_10MIN',
+                        notificationSentAt: now,
+                        agentConnectionStatus: 'CONNECTED',
+                        source: effectiveSource
+                    }
+                });
+            }
+
+            // 2. Update Employee status in DB
+            await prisma.employee.update({
+                where: { id: employeeId },
+                data: {
+                    status: 'IDLE',
+                    idleStartTime: parsedStartTime
+                }
+            });
+
+            // 3. Save in ActivityLog for timesheet compatibility
             await prisma.activityLog.create({
                 data: {
                     activityType: 'IDLE',
                     productivity: 'UNPRODUCTIVE',
                     duration: parsedIdleDuration,
-                    timestamp: timestamp ? new Date(timestamp) : new Date(),
+                    timestamp: timestamp ? new Date(timestamp) : now,
                     appWebsite: 'Away from Computer (Idle)',
                     employeeId,
                     taskId: validTaskIdForDb,
@@ -562,7 +643,30 @@ const handleIdleActivity = async (req, res) => {
                 }
             });
 
-            // 3. Find assigned Manager or Admin for Email Alert
+            // 4. Log Alert in AlertLog
+            let alertRecord = null;
+            try {
+                alertRecord = await prisma.alertLog.create({
+                    data: {
+                        organizationId,
+                        employeeId,
+                        ruleType: 'IDLE_TIMEOUT',
+                        trigger: '10_MIN_INACTIVITY',
+                        severity: 'warning',
+                        message: `Employee ${employee.fullName} has been inactive for 10 minutes.`,
+                        metadata: JSON.stringify({
+                            idleDuration: parsedIdleDuration,
+                            idleStartTime: parsedStartTime,
+                            lastActivityAt: employee.lastActiveAt || parsedStartTime,
+                            source: effectiveSource
+                        })
+                    }
+                });
+            } catch (alertErr) {
+                console.error('[AgentController] Error creating AlertLog:', alertErr.message);
+            }
+
+            // 5. Find assigned Manager or Admin for Email Alert
             let manager = null;
             if (employee.teamId) {
                 manager = await prisma.employee.findFirst({
@@ -583,26 +687,26 @@ const handleIdleActivity = async (req, res) => {
                 }
             }
 
-            // 4. Send Email Notification via Nodemailer
+            // 6. Send Email Notification via Nodemailer
             try {
                 emailResult = await sendIdleAlertEmail({
                     employee,
                     manager,
                     idleDuration: parsedIdleDuration,
                     taskId: validatedTaskId,
-                    timestamp: timestamp || new Date().toISOString()
+                    timestamp: timestamp || now.toISOString()
                 });
             } catch (emailErr) {
                 console.error('[AgentController] Error sending idle notification email:', emailErr.message);
             }
 
-            // 5. Emit Socket.IO real-time events to update Admin Dashboard
-            const io = getIO();
-            if (io && organizationId) {
-                const room = `org_${organizationId}`;
+            // 7. Emit Socket.IO real-time events to update Admin Dashboard
+            if (io && room) {
                 io.to(room).emit('employee:status', {
                     employeeId,
-                    status: 'idle'
+                    status: 'idle',
+                    idleStartTime: parsedStartTime,
+                    idleDuration: parsedIdleDuration
                 });
                 io.to(room).emit('activity:update', {
                     employeeId,
@@ -610,31 +714,78 @@ const handleIdleActivity = async (req, res) => {
                     idleTime: parsedIdleDuration,
                     productivity: 'UNPRODUCTIVE',
                     taskId: validatedTaskId,
-                    timestamp: new Date()
+                    timestamp: now
                 });
                 io.to(room).emit('alert:idle', {
                     employeeId,
                     employeeName: employee.fullName,
                     idleDuration: parsedIdleDuration,
+                    idleStartTime: parsedStartTime,
                     managerEmail: manager?.email || null,
-                    timestamp: new Date()
+                    timestamp: now
+                });
+                io.to(room).emit('alert:new', {
+                    id: alertRecord?.id || `idle-${Date.now()}`,
+                    employeeId,
+                    employeeName: employee.fullName,
+                    title: 'Employee Inactivity Alert',
+                    message: `Employee ${employee.fullName} has been inactive for 10 minutes.`,
+                    severity: 'warning',
+                    ruleType: 'IDLE_TIMEOUT',
+                    trigger: '10_MIN_INACTIVITY',
+                    idleDuration: parsedIdleDuration,
+                    createdAt: now
+                });
+                io.to(room).emit('admin:idle_alert', {
+                    employeeId,
+                    employeeName: employee.fullName,
+                    idleDuration: parsedIdleDuration,
+                    idleStartTime: parsedStartTime,
+                    lastActivityAt: employee.lastActiveAt || parsedStartTime,
+                    status: 'IDLE'
                 });
             }
 
             console.log(`[AgentController] IDLE event recorded for ${employee.fullName} (${parsedIdleDuration}s). Alert email sent: ${emailResult?.sent ? 'Yes' : 'Simulated'}`);
         } else if (status === 'RESUMED' || status === 'ACTIVE') {
-            // Employee resumed activity
-            await prisma.employee.update({
-                where: { id: employeeId },
-                data: { status: 'ACTIVE' }
+            // Employee resumed activity: genuine mouse/keyboard input detected
+            const openSession = await prisma.idleSession.findFirst({
+                where: { employeeId, idleEndTime: null },
+                orderBy: { createdAt: 'desc' }
             });
 
-            const io = getIO();
-            if (io && organizationId) {
-                const room = `org_${organizationId}`;
+            let finalDuration = parsedIdleDuration;
+            if (openSession) {
+                finalDuration = Math.max(
+                    openSession.idleDuration || 0,
+                    Math.round((now.getTime() - new Date(openSession.idleStartTime).getTime()) / 1000)
+                );
+                await prisma.idleSession.update({
+                    where: { id: openSession.id },
+                    data: {
+                        idleEndTime: now,
+                        idleDuration: finalDuration,
+                        activityStatus: 'ACTIVE'
+                    }
+                });
+            }
+
+            // Update Employee status and timestamps in DB
+            await prisma.employee.update({
+                where: { id: employeeId },
+                data: {
+                    status: 'ACTIVE',
+                    lastActiveAt: now,
+                    idleStartTime: null,
+                    totalIdleSeconds: { increment: Math.max(0, finalDuration) }
+                }
+            });
+
+            if (io && room) {
                 io.to(room).emit('employee:status', {
                     employeeId,
-                    status: 'online'
+                    status: 'online',
+                    lastActiveAt: now
                 });
                 io.to(room).emit('activity:update', {
                     employeeId,
@@ -642,11 +793,17 @@ const handleIdleActivity = async (req, res) => {
                     idleTime: 0,
                     productivity: 'PRODUCTIVE',
                     taskId: validatedTaskId,
-                    timestamp: new Date()
+                    timestamp: now
+                });
+                io.to(room).emit('employee:idle_resumed', {
+                    employeeId,
+                    employeeName: employee.fullName,
+                    idleDuration: finalDuration,
+                    resumedAt: now
                 });
             }
 
-            console.log(`[AgentController] RESUMED activity event recorded for ${employee.fullName}. Employee is now ACTIVE.`);
+            console.log(`[AgentController] RESUMED activity event recorded for ${employee.fullName} after ${finalDuration}s idle. Status: ACTIVE.`);
         }
 
         return successResponse(res, {
@@ -660,6 +817,168 @@ const handleIdleActivity = async (req, res) => {
     } catch (error) {
         console.error('handleIdleActivity error:', error);
         return errorResponse(res, error.message || 'Failed to process idle activity', 500);
+    }
+};
+
+const handleIdleResponse = async (req, res) => {
+    try {
+        const { employeeId, response, taskId } = req.body;
+        if (!employeeId || !response) {
+            return errorResponse(res, 'Employee ID and Response (WORKING or BREAK) are required', 400);
+        }
+
+        const employee = await prisma.employee.findUnique({
+            where: { id: employeeId }
+        });
+        if (!employee) return errorResponse(res, 'Employee not found', 404);
+
+        const now = new Date();
+        const organizationId = employee.organizationId;
+        const room = organizationId ? `org_${organizationId}` : null;
+        const io = getIO();
+
+        // Update latest idle session
+        const latestSession = await prisma.idleSession.findFirst({
+            where: { employeeId },
+            orderBy: { createdAt: 'desc' }
+        });
+
+        if (latestSession) {
+            await prisma.idleSession.update({
+                where: { id: latestSession.id },
+                data: {
+                    employeeResponse: response,
+                    employeeResponseAt: now,
+                    ...(latestSession.idleEndTime ? {} : {
+                        idleEndTime: now,
+                        activityStatus: response === 'WORKING' ? 'ACTIVE' : 'BREAK'
+                    })
+                }
+            });
+        }
+
+        if (response === 'BREAK') {
+            await prisma.employee.update({
+                where: { id: employeeId },
+                data: { status: 'BREAK' }
+            });
+            if (io && room) {
+                io.to(room).emit('employee:status', { employeeId, status: 'break' });
+            }
+        } else if (response === 'WORKING') {
+            await prisma.employee.update({
+                where: { id: employeeId },
+                data: { status: 'ACTIVE', lastActiveAt: now, idleStartTime: null }
+            });
+            if (io && room) {
+                io.to(room).emit('employee:status', { employeeId, status: 'online', lastActiveAt: now });
+                io.to(room).emit('employee:idle_resumed', {
+                    employeeId,
+                    employeeName: employee.fullName,
+                    idleDuration: latestSession?.idleDuration || 0,
+                    resumedAt: now
+                });
+            }
+        }
+
+        return successResponse(res, {
+            employeeId,
+            response,
+            recordedAt: now
+        }, `Idle confirmation '${response}' recorded successfully`);
+    } catch (error) {
+        console.error('handleIdleResponse error:', error);
+        return errorResponse(res, error.message || 'Failed to record idle confirmation', 500);
+    }
+};
+
+const getIdleSessions = async (req, res) => {
+    try {
+        const { employeeId } = req.params;
+        const sessions = await prisma.idleSession.findMany({
+            where: { employeeId },
+            orderBy: { createdAt: 'desc' },
+            take: 50
+        });
+
+        const employee = await prisma.employee.findUnique({
+            where: { id: employeeId },
+            select: {
+                id: true,
+                fullName: true,
+                status: true,
+                lastActiveAt: true,
+                idleStartTime: true,
+                totalIdleSeconds: true
+            }
+        });
+
+        return successResponse(res, {
+            employee,
+            sessions
+        }, 'Idle sessions retrieved successfully');
+    } catch (error) {
+        console.error('getIdleSessions error:', error);
+        return errorResponse(res, error.message || 'Failed to retrieve idle sessions', 500);
+    }
+};
+
+const getActivitySummary = async (req, res) => {
+    try {
+        const { employeeId } = req.params;
+        const todayStart = new Date();
+        todayStart.setHours(0, 0, 0, 0);
+
+        const employee = await prisma.employee.findUnique({
+            where: { id: employeeId },
+            include: { agent: true }
+        });
+        if (!employee) return errorResponse(res, 'Employee not found', 404);
+
+        const idleSessions = await prisma.idleSession.findMany({
+            where: {
+                employeeId,
+                createdAt: { gte: todayStart }
+            },
+            orderBy: { createdAt: 'asc' }
+        });
+
+        const activityLogs = await prisma.activityLog.findMany({
+            where: {
+                employeeId,
+                timestamp: { gte: todayStart }
+            }
+        });
+
+        const totalIdleTime = idleSessions.reduce((acc, s) => acc + (s.idleDuration || 0), 0);
+        const totalActiveTime = activityLogs
+            .filter(l => l.productivity === 'PRODUCTIVE' || l.activityType === 'ACTIVE')
+            .reduce((acc, l) => acc + (l.duration || 0), 0);
+
+        const firstActivity = activityLogs.length > 0 ? activityLogs[0].timestamp : employee.lastActiveAt;
+        const lastActivity = employee.lastActiveAt || (activityLogs.length > 0 ? activityLogs[activityLogs.length - 1].timestamp : null);
+
+        return successResponse(res, {
+            employeeId,
+            fullName: employee.fullName,
+            status: employee.status,
+            lastActiveAt: employee.lastActiveAt,
+            idleStartTime: employee.idleStartTime,
+            agentConnected: employee.agent?.status === 'active',
+            summary: {
+                totalActiveTime,
+                totalIdleTime,
+                totalBreakTime: 0,
+                idleSessionCount: idleSessions.length,
+                notificationsSent: idleSessions.filter(s => !!s.notificationType).length,
+                firstActivityTime: firstActivity,
+                lastActivityTime: lastActivity
+            },
+            recentSessions: idleSessions.slice(-10)
+        }, 'Activity summary generated successfully');
+    } catch (error) {
+        console.error('getActivitySummary error:', error);
+        return errorResponse(res, error.message || 'Failed to generate activity summary', 500);
     }
 };
 
@@ -709,6 +1028,9 @@ module.exports = {
     heartbeat,
     logActivity,
     handleIdleActivity,
+    handleIdleResponse,
+    getIdleSessions,
+    getActivitySummary,
     getAgentProjects,
     downloadAgent,
     getVersion,

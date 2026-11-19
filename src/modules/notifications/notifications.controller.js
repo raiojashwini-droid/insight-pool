@@ -2,6 +2,27 @@ const notificationsService = require('./notifications.service');
 const { getOrganizationId } = require('../../utils/orgId');
 
 const notificationsController = {
+    createNotification: async (req, res) => {
+        try {
+            const organizationId = await getOrganizationId(req);
+            const { title, description, type, targetUserId, link, metadata } = req.body;
+            if (!title) {
+                return res.status(400).json({ message: 'Notification title is required' });
+            }
+            const notification = await notificationsService.createNotification(organizationId, {
+                title,
+                description,
+                type: type || 'info',
+                targetUserId: targetUserId || null,
+                link: link || null,
+                metadata
+            });
+            res.status(201).json({ success: true, notification });
+        } catch (error) {
+            res.status(500).json({ message: error.message });
+        }
+    },
+
     getNotifications: async (req, res) => {
         try {
             const organizationId = await getOrganizationId(req);

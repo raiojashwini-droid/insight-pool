@@ -37,7 +37,15 @@ const activityController = {
                 return errorResponse(res, 'Access denied: You can only view your own activity', 403);
             }
 
-            // Manager and Admin can view any employee activity
+            if (role === 'MANAGER') {
+                const targetEmp = await require('../../config/db').employee.findUnique({
+                    where: { id: employeeId },
+                    select: { role: true }
+                });
+                if (targetEmp?.role === 'ADMIN') {
+                    return errorResponse(res, 'Access denied: You cannot view admin activity', 403);
+                }
+            }
 
             const logs = await activityService.getEmployeeActivity(employeeId, startDate, endDate);
             return successResponse(res, logs, 'Employee activity fetched successfully');
@@ -115,6 +123,16 @@ const activityController = {
                 return errorResponse(res, 'Access denied: You can only view your own summary', 403);
             }
 
+            if (role === 'MANAGER') {
+                const targetEmp = await require('../../config/db').employee.findUnique({
+                    where: { id: employeeId },
+                    select: { role: true }
+                });
+                if (targetEmp?.role === 'ADMIN') {
+                    return errorResponse(res, 'Access denied: You cannot view admin summary', 403);
+                }
+            }
+
             const summary = await activityService.getEmployeeSummary(employeeId, startDate, endDate);
             return successResponse(res, summary, 'Employee summary fetched successfully');
         } catch (error) {
@@ -145,7 +163,8 @@ const activityController = {
                 organizationId,
                 date,
                 targetEmployeeId,
-                teamId
+                teamId,
+                req.user
             );
             return successResponse(res, report, 'Activities timeline report fetched successfully');
         } catch (error) {

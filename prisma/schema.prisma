@@ -69,6 +69,7 @@ model Organization {
   trackingSettings        TrackingSetting[]
   videoRecordings         VideoRecording[]
   workZones               WorkZone[]
+  idleSessions            IdleSession[]
 
   @@map("organizations")
 }
@@ -122,7 +123,11 @@ model Employee {
   updatedAt          DateTime            @updatedAt
   workMode           String?             @default("Remote")
   payRateType        String              @default("DAILY")
+  lastActiveAt       DateTime?
+  idleStartTime      DateTime?
+  totalIdleSeconds   Int                 @default(0)
   activityLogs       ActivityLog[]
+  idleSessions       IdleSession[]
   agent              Agent?
   alertLogs          AlertLog[]
   appUsageLogs       AppUsageLog[]
@@ -974,4 +979,31 @@ enum TimesheetStatus {
   SUBMITTED
   APPROVED
   REJECTED
+}
+
+model IdleSession {
+  id                    String       @id @default(uuid())
+  employeeId            String
+  organizationId        String
+  sessionId             String?
+  activityStatus        String       @default("IDLE")
+  lastActivityAt        DateTime     @default(now())
+  idleStartTime         DateTime     @default(now())
+  idleEndTime           DateTime?
+  idleDuration          Int          @default(0)
+  notificationType      String?
+  notificationSentAt    DateTime?
+  employeeResponse      String?
+  employeeResponseAt    DateTime?
+  agentConnectionStatus String?      @default("CONNECTED")
+  source                String       @default("DESKTOP_AGENT")
+  createdAt             DateTime     @default(now())
+  updatedAt             DateTime     @updatedAt
+
+  employee              Employee     @relation(fields: [employeeId], references: [id], onDelete: Cascade)
+  organization          Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  @@index([employeeId, createdAt])
+  @@index([organizationId, createdAt])
+  @@map("idle_sessions")
 }

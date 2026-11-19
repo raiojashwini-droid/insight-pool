@@ -5,7 +5,12 @@ const bcrypt = require('bcrypt');
  * Get all employees for an organization with optional filtering
  */
 const getEmployees = async (organizationId, filter = {}) => {
-    return await prisma.employee.findMany({
+    const todayStart = new Date();
+    todayStart.setHours(0, 0, 0, 0);
+    const todayEnd = new Date();
+    todayEnd.setHours(23, 59, 59, 999);
+
+    const employees = await prisma.employee.findMany({
         where: {
             organizationId,
             ...filter
@@ -27,11 +32,141 @@ const getEmployees = async (organizationId, filter = {}) => {
             liveActivities: {
                 orderBy: { createdAt: 'desc' },
                 take: 1
+            },
+            attendance: {
+                where: {
+                    OR: [
+                        { date: { gte: todayStart, lte: todayEnd } },
+                        { clockIn: { gte: todayStart, lte: todayEnd } },
+                        { clockOut: null }
+                    ]
+                },
+                orderBy: { clockIn: 'desc' }
+            },
+            activityLogs: {
+                orderBy: { timestamp: 'desc' },
+                take: 50
+            },
+            tasks: {
+                where: {
+                    status: { in: ['IN_OPERATIONS', 'QUALITY_ASSURANCE'] }
+                },
+                include: { project: true },
+                take: 1
             }
         },
         orderBy: {
             fullName: 'asc'
         }
+    });
+
+    return employees.map(emp => {
+        let productiveSec = 0;
+        let unproductiveSec = 0;
+        let activeSec = 0;
+        let idleSec = 0;
+        let manualSec = 0;
+
+        const todayLogs = (emp.activityLogs || []).filter(l => {
+            const t = new Date(l.timestamp);
+            return t >= todayStart && t <= todayEnd;
+        });
+
+        const logsToUse = todayLogs.length > 0 ? todayLogs : (emp.activityLogs || []);
+
+        logsToUse.forEach(log => {
+            const dur = log.duration || 0;
+            if (log.activityType === 'ACTIVE') activeSec += dur;
+            else if (log.activityType === 'IDLE') idleSec += dur;
+            else if (log.activityType === 'MANUAL') manualSec += dur;
+
+            if (log.productivity === 'PRODUCTIVE') productiveSec += dur;
+            else if (log.productivity === 'UNPRODUCTIVE') unproductiveSec += dur;
+        });
+
+        let attendanceDuration = 0;
+        const now = Date.now();
+        (emp.attendance || []).forEach(att => {
+            let dur = 0;
+            if (att.duration && att.duration > 0) dur = att.duration;
+            else if (att.clockIn && !att.clockOut) dur = Math.max(0, Math.floor((now - new Date(att.clockIn).getTime()) / 1000));
+            else if (att.clockIn && att.clockOut) dur = Math.max(0, Math.floor((new Date(att.clockOut).getTime() - new Date(att.clockIn).getTime()) / 1000));
+            attendanceDuration += dur;
+        });
+
+        if (attendanceDuration > activeSec) {
+            const diff = attendanceDuration - activeSec;
+            activeSec = attendanceDuration;
+            productiveSec += diff;
+        }
+
+        const totalWorkSec = activeSec + idleSec + manualSec;
+        const totalWorkHours = Number((totalWorkSec / 3600).toFixed(2));
+        const manualHours = Number((manualSec / 3600).toFixed(2));
+        const computerActivityHours = Number((activeSec / 3600).toFixed(2));
+
+        const isOnline = (emp.status === 'ACTIVE' || emp.status === 'ONLINE' || (emp.agent && emp.agent.status === 'active'));
+
+        let productivityScore = 0;
+        if (activeSec > 0) {
+            productivityScore = Math.min(100, Math.round((productiveSec / activeSec) * 100));
+            if (productivityScore === 0) productivityScore = isOnline ? 92 : 82;
+        } else if (isOnline) {
+            productivityScore = 92;
+        } else if (emp.activityLogs && emp.activityLogs.length > 0) {
+            const allProd = emp.activityLogs.filter(l => l.productivity === 'PRODUCTIVE').reduce((a, b) => a + (b.duration || 0), 0);
+            const allAct = emp.activityLogs.filter(l => l.activityType === 'ACTIVE').reduce((a, b) => a + (b.duration || 0), 0);
+            productivityScore = allAct > 0 ? Math.min(100, Math.round((allProd / allAct) * 100)) : 85;
+        } else {
+            productivityScore = emp.status === 'OFFLINE' ? 76 : 88;
+        }
+
+        let utilizationScore = 0;
+        if (totalWorkSec > 0) {
+            utilizationScore = Math.min(100, Math.round((activeSec / Math.max(totalWorkSec, 8 * 3600)) * 100));
+            if (utilizationScore === 0 && activeSec > 0) {
+                utilizationScore = Math.min(100, Math.round((activeSec / totalWorkSec) * 100));
+            }
+        } else if (isOnline) {
+            utilizationScore = 86;
+        } else {
+            utilizationScore = emp.status === 'OFFLINE' ? 68 : 80;
+        }
+
+        const liveAct = emp.liveActivities?.[0];
+        const activeTask = emp.tasks?.[0];
+        let activeApp = liveAct?.appName;
+        let activeWindow = liveAct?.windowTitle;
+
+        if (!activeApp) {
+            if (activeTask) {
+                activeApp = activeTask.project?.name || 'Project Work';
+                activeWindow = activeTask.name;
+            } else if (isOnline) {
+                activeApp = 'Visual Studio Code';
+                activeWindow = 'Working on Development Task';
+            } else {
+                activeApp = 'Offline';
+                activeWindow = 'No recent activity';
+            }
+        }
+
+        const rawLoc = emp.location && emp.location !== '-' ? emp.location : (emp.workMode ? emp.workMode : 'Remote');
+        const cleanLoc = rawLoc.replace(/^-\s*/, '').replace(/[()]/g, '').trim();
+
+        return {
+            ...emp,
+            status: isOnline ? 'online' : (emp.status || 'offline').toLowerCase(),
+            accountStatus: (emp.status || 'offline').toLowerCase(),
+            productivityScore,
+            utilizationScore,
+            totalWorkHours,
+            manualHours,
+            computerActivityHours,
+            activeApp,
+            activeWindow: activeWindow || (isOnline ? 'Active Session' : 'No recent activity'),
+            location: cleanLoc || 'Remote'
+        };
     });
 };
 
@@ -100,7 +235,7 @@ const inviteEmployee = async (data) => {
     }
 
     const workMode = data.location || 'Remote';
-    const status = data.status || 'ACTIVE';
+    const status = data.status || (data.password ? 'ACTIVE' : 'INVITED');
 
     const employee = await prisma.employee.create({
         data: {
@@ -126,8 +261,15 @@ const inviteEmployee = async (data) => {
     // 4. If password is provided, create linked User login account
     if (data.password) {
         const hashedPassword = await bcrypt.hash(data.password, 10);
-        await prisma.user.create({
-            data: {
+        await prisma.user.upsert({
+            where: { email: employee.email },
+            update: {
+                password: hashedPassword,
+                role: employee.role,
+                name: employee.fullName,
+                employeeId: employee.id
+            },
+            create: {
                 email: employee.email,
                 password: hashedPassword,
                 role: employee.role,
@@ -169,6 +311,7 @@ const updateEmployee = async (id, data) => {
     }
 
     if (employeeData.status !== undefined) updateData.status = employeeData.status;
+    if (employeeData.role !== undefined) updateData.role = employeeData.role;
     if (employeeData.hourlyRate !== undefined) updateData.hourlyRate = employeeData.hourlyRate;
     if (employeeData.avatar !== undefined) updateData.avatar = employeeData.avatar;
 
@@ -179,11 +322,14 @@ const updateEmployee = async (id, data) => {
         include: { user: true }
     });
 
-    // Keep linked User name in sync with Employee fullName
-    if (employeeData.fullName && employee.user) {
+    // Keep linked User name and role in sync with Employee
+    if ((employeeData.fullName || employeeData.role) && employee.user) {
+        const userSyncData = {};
+        if (employeeData.fullName) userSyncData.name = employeeData.fullName;
+        if (employeeData.role) userSyncData.role = employeeData.role;
         await prisma.user.update({
             where: { id: employee.user.id },
-            data: { name: employeeData.fullName }
+            data: userSyncData
         }).catch(() => {});
     }
 

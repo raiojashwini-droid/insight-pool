@@ -23,18 +23,23 @@ const createInvitationToken = async (email, role, organizationId) => {
     return { invitation, token, expiresAt };
 };
 
-const sendInvitation = async (email, role, organizationId, fullName) => {
+const sendInvitation = async (email, role, organizationId, fullName, employeeId = null) => {
     const { token } = await createInvitationToken(email, role, organizationId);
 
     if (role === 'ADMIN' || role === 'MANAGER') {
         await prisma.user.upsert({
             where: { email },
-            update: { name: fullName, role },
+            update: { 
+                name: fullName, 
+                role,
+                ...(employeeId ? { employeeId } : {})
+            },
             create: {
                 email,
                 name: fullName,
                 role,
                 password: await bcrypt.hash(crypto.randomBytes(16).toString('hex'), 10),
+                ...(employeeId ? { employeeId } : {})
             },
         });
     }
@@ -154,6 +159,10 @@ const completeInvitation = async (token, password) => {
                 password: hashedPassword,
                 role: invitation.role,
             },
+        });
+        await prisma.employee.updateMany({
+            where: { email: invitation.email },
+            data: { status: 'ACTIVE' }
         });
     }
 

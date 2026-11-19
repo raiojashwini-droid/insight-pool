@@ -65,13 +65,14 @@ const authMiddleware = async (req, res, next) => {
             const emp = orConditions.length > 0
                 ? await prisma.employee.findFirst({
                     where: { OR: orConditions },
-                    select: { id: true, organizationId: true, role: true }
+                    select: { id: true, organizationId: true, role: true, teamId: true }
                 })
                 : null;
 
             if (emp) {
                 req.user.employeeId   = emp.id;
                 req.user.organizationId = emp.organizationId || 'default-org-id';
+                req.user.teamId       = emp.teamId || null;
                 // Always use the DB role so stale tokens can't bypass role-based filters
                 req.user.role = emp.role;
             } else if (!req.user.organizationId) {

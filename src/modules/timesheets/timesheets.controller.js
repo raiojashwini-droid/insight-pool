@@ -39,21 +39,35 @@ const timesheetsController = {
                 // Validate target employee exists within organization (prevent cross-organization access)
                 const targetEmployee = await prisma.employee.findFirst({
                     where: { id: targetEmployeeId, organizationId },
-                    select: { id: true, teamId: true }
+                    select: { id: true, teamId: true, role: true }
                 });
 
                 if (!targetEmployee) {
                     return errorResponse(res, 'Employee not found in organization', 404);
                 }
 
+                if (targetEmployee.role === 'ADMIN') {
+                    return errorResponse(res, 'Admin accounts do not have trackable timesheets', 400);
+                }
+
                 // If requester is a Manager, enforce team-level authorization
-                if (role === 'MANAGER') {
+                // If requester is a Manager, enforce role and team-level authorization
+                if (role === 'MANAGER' && targetEmployeeId !== employeeId) {
+                    const targetEmpRole = await prisma.employee.findUnique({
+                        where: { id: targetEmployeeId },
+                        select: { role: true, teamId: true }
+                    });
+
+                    if (targetEmpRole?.role === 'ADMIN') {
+                        return errorResponse(res, 'Access denied: You cannot access admin timesheets', 403);
+                    }
+
                     const manager = await prisma.employee.findUnique({
                         where: { id: employeeId },
                         select: { teamId: true }
                     });
 
-                    if (!manager?.teamId || manager.teamId !== targetEmployee.teamId) {
+                    if (manager?.teamId && manager.teamId !== targetEmployee.teamId) {
                         return errorResponse(res, 'Access denied: You can only access timesheets for employees in your assigned team', 403);
                     }
                 }
@@ -125,7 +139,10 @@ const timesheetsController = {
                 return errorResponse(res, 'Access denied: Admin or Manager permission required', 403);
             }
 
-            const queue = await timesheetsService.getApprovalQueue(organizationId, req.user);
+            const queue = await timesheetsService.getApprovalQueue(organizationId, {
+                ...req.user,
+                filterStatus: req.query.status
+            });
             return successResponse(res, queue, 'Approval queue fetched successfully');
         } catch (error) {
             return errorResponse(res, error.message, 500);

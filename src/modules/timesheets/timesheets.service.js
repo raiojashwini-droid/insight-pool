@@ -207,14 +207,15 @@ const timesheetsService = {
      */
     getWeeklyTimesheetsAll: async (organizationId, weekInput, filters = {}, requester = {}) => {
         const weekStart = mondayOf(weekInput || new Date());
-        const employeeWhere = { organizationId, status: { not: 'DEACTIVATED' } };
+        const employeeWhere = { organizationId, status: { not: 'DEACTIVATED' }, role: { not: 'ADMIN' } };
 
         if (filters.employeeId) {
             employeeWhere.id = filters.employeeId;
         }
 
-        // If requester is a Manager, scope to their team
+        // If requester is a Manager, scope to role EMPLOYEE and their team
         if (requester.role === 'MANAGER') {
+            employeeWhere.role = 'EMPLOYEE';
             const manager = await prisma.employee.findUnique({
                 where: { id: requester.employeeId },
                 select: { teamId: true }
@@ -320,9 +321,15 @@ const timesheetsService = {
      */
     getApprovalQueue: async (organizationId, requester = {}) => {
         const where = {
-            organizationId,
-            status: 'SUBMITTED'
+            organizationId
         };
+
+        const filterStatus = (requester.filterStatus || 'ALL').toUpperCase();
+        if (filterStatus === 'SUBMITTED' || filterStatus === 'APPROVED' || filterStatus === 'REJECTED') {
+            where.status = filterStatus;
+        } else {
+            where.status = { in: ['SUBMITTED', 'APPROVED', 'REJECTED'] };
+        }
 
         if (requester.role === 'MANAGER') {
             const manager = await prisma.employee.findUnique({
@@ -330,10 +337,15 @@ const timesheetsService = {
                 select: { teamId: true }
             });
 
-            where.employee = {
-                teamId: manager?.teamId || null,
+            const empCondition = {
+                role: 'EMPLOYEE',
                 id: { not: requester.employeeId } // Manager cannot approve self
             };
+            if (manager?.teamId) {
+                empCondition.teamId = manager.teamId;
+            }
+
+            where.employee = empCondition;
         }
 
         const submittedTimesheets = await prisma.timesheet.findMany({
@@ -348,7 +360,7 @@ const timesheetsService = {
                     orderBy: { createdAt: 'desc' }
                 }
             },
-            orderBy: { submittedAt: 'asc' }
+            orderBy: { updatedAt: 'desc' }
         });
 
         // Enrich with weekly breakdown
@@ -360,10 +372,20 @@ const timesheetsService = {
                     timesheetId: ts.id,
                     status: ts.status,
                     submittedAt: ts.submittedAt,
+                    updatedAt: ts.updatedAt,
                     approvals: ts.approvals
                 };
             })
         );
+
+        // Sort: SUBMITTED (pending action) first, then REJECTED, then APPROVED (by latest updatedAt/submittedAt)
+        const statusPriority = { SUBMITTED: 1, REJECTED: 2, APPROVED: 3 };
+        queue.sort((a, b) => {
+            const pA = statusPriority[a.status] || 99;
+            const pB = statusPriority[b.status] || 99;
+            if (pA !== pB) return pA - pB;
+            return new Date(b.updatedAt || b.submittedAt || 0) - new Date(a.updatedAt || a.submittedAt || 0);
+        });
 
         return queue;
     },

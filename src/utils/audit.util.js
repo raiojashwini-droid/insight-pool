@@ -26,7 +26,7 @@ const createAuditLog = async ({ organizationId, userId, action, status, ipAddres
                 action,
                 status,
                 ipAddress: ipAddress || null,
-                metadata: metadata || {}
+                metadata: typeof metadata === 'object' ? JSON.stringify(metadata) : (metadata || '{}')
             }
         });
     } catch (error) {

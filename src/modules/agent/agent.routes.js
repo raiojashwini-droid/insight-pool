@@ -87,6 +87,9 @@ router.get('/check-device/:deviceId', agentController.checkDevice);
 router.post('/heartbeat', agentController.heartbeat);
 router.post('/activity', agentController.logActivity);
 router.post('/idle-activity', agentController.handleIdleActivity);
+router.post('/idle-response', agentController.handleIdleResponse);
+router.get('/idle-sessions/:employeeId', combinedAuth, agentController.getIdleSessions);
+router.get('/activity-summary/:employeeId', combinedAuth, agentController.getActivitySummary);
 router.post('/stop-tracking', agentController.stopTracking);
 
 // Authenticated status and management

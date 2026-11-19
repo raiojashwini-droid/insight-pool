@@ -11,6 +11,7 @@ backups/
 *.sql
 public/uploads/screenshots/
 public/agent/*.exe
+!public/agent/EMS-Tracker-latest.exe
 public/agent/*.zip
 public/uploads/videos/
 

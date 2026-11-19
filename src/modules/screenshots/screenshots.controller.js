@@ -43,6 +43,26 @@ const screenshotsController = {
                 capturedAt: capturedAt ? new Date(capturedAt) : new Date(),
             });
 
+            // Emit real-time event to organization room so admins & managers see it immediately
+            try {
+                const { getIO } = require('../../socket/server');
+                const io = getIO();
+                if (io) {
+                    const emp = await prisma.employee.findUnique({
+                        where: { id: employeeId },
+                        include: { team: true }
+                    });
+                    io.to(`org_${organizationId}`).emit('screenshot:new', {
+                        ...screenshot,
+                        employee: emp?.fullName || 'Employee',
+                        team: emp?.team?.name || 'General',
+                        timestamp: screenshot.capturedAt
+                    });
+                }
+            } catch (socketErr) {
+                console.error('[ScreenshotsController] Socket broadcast error:', socketErr.message);
+            }
+
             return successResponse(res, screenshot, 'Screenshot captured successfully');
         } catch (error) {
             console.error('Error creating screenshot:', error);
@@ -136,6 +156,18 @@ const screenshotsController = {
             if (!screenshot) {
                 return errorResponse(res, 'Screenshot not found', 404);
             }
+
+            // Broadcast blur update via socket
+            try {
+                const { getIO } = require('../../socket/server');
+                const io = getIO();
+                if (io) {
+                    io.to(`org_${screenshot.organizationId}`).emit('screenshot:blur_updated', {
+                        id: screenshot.id,
+                        blurred: screenshot.blurred
+                    });
+                }
+            } catch (sockErr) {}
 
             return successResponse(res, screenshot, `Screenshot ${screenshot.blurred ? 'blurred' : 'unblurred'} successfully`);
         } catch (error) {

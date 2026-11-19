@@ -39,18 +39,23 @@ async function main() {
 
     const usersToCreate = [
         {
-            name: 'Jane Admin',
-            email: 'admin@example.com',
+            name: 'admin demo',
+            email: 'admin@gmail.com',
             role: 'ADMIN',
         },
         {
-            name: 'Mike Manager',
+            name: 'Demo Manager',
             email: 'manager@example.com',
             role: 'MANAGER',
         },
         {
-            name: 'Alex Employee',
-            email: 'employee@example.com',
+            name: 'demo',
+            email: 'demo1@gmail.com',
+            role: 'EMPLOYEE',
+        },
+        {
+            name: 'rahul',
+            email: 'rahul@gmail.com',
             role: 'EMPLOYEE',
         },
     ];

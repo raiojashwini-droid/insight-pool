@@ -485,47 +485,6 @@ const findAgentByDeviceId = async (deviceId) => {
  * Get all registered agents
  */
 const getAllAgents = async (organizationId) => {
-    // 1. Auto-sync any active monitored employees who do not have an agent record yet
-    try {
-        const empWhere = {
-            role: 'EMPLOYEE',
-            status: { not: 'DEACTIVATED' },
-            ...(organizationId ? { organizationId } : {})
-        };
-        const monitoredEmployees = await prisma.employee.findMany({
-            where: empWhere,
-            include: { agent: true }
-        });
-
-        for (const emp of monitoredEmployees) {
-            if (!emp.agent) {
-                const cleanName = (emp.fullName || 'EMP').replace(/[^a-zA-Z0-9]/g, '').toUpperCase().slice(0, 6);
-                const shortId = emp.id.slice(0, 4).toUpperCase();
-                const genDeviceId = `DEV-${cleanName}-${shortId}`;
-
-                await prisma.agent.upsert({
-                    where: { employeeId: emp.id },
-                    create: {
-                        employeeId: emp.id,
-                        deviceId: genDeviceId,
-                        status: 'active',
-                        systemInfo: {
-                            platform: 'win32',
-                            release: '10.0.19045',
-                            arch: 'x64',
-                            hostname: `DESKTOP-${cleanName}`
-                        },
-                        lastSeen: new Date(),
-                        createdAt: emp.createdAt || new Date()
-                    },
-                    update: {}
-                });
-            }
-        }
-    } catch (autoErr) {
-        console.warn('[getAllAgents] Auto agent sync warning:', autoErr.message);
-    }
-
     const where = organizationId ? { employee: { organizationId } } : {};
     return await prisma.agent.findMany({
         where,

@@ -14,9 +14,13 @@ const getPayrollSummary = async (organizationId, params = {}) => {
     const end = endDate ? new Date(endDate) : new Date();
     end.setHours(23, 59, 59, 999);
 
-    const employeeWhere = { organizationId };
-    if (userId) employeeWhere.id = userId;
-    else if (teamId) employeeWhere.teamId = teamId;
+    const employeeWhere = { organizationId, role: { not: 'ADMIN' } };
+    if (userId) {
+        delete employeeWhere.role;
+        employeeWhere.id = userId;
+    } else if (teamId) {
+        employeeWhere.teamId = teamId;
+    }
 
     const startStr = start.toISOString().split('T')[0];
     const endStr = end.toISOString().split('T')[0];
@@ -168,9 +172,13 @@ const getPayrollRecords = async (organizationId, startDate, endDate, params = {}
     const end = endDate instanceof Date ? endDate : (endDate ? new Date(endDate) : new Date());
     end.setHours(23, 59, 59, 999);
 
-    const employeeWhere = { organizationId };
-    if (userId) employeeWhere.id = userId;
-    else if (teamId) employeeWhere.teamId = teamId;
+    const employeeWhere = { organizationId, role: { not: 'ADMIN' } };
+    if (userId) {
+        delete employeeWhere.role;
+        employeeWhere.id = userId;
+    } else if (teamId) {
+        employeeWhere.teamId = teamId;
+    }
 
     const startStr = start.toISOString().split('T')[0];
     const endStr = end.toISOString().split('T')[0];

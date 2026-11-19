@@ -280,7 +280,7 @@ const getAdherenceReport = async (organizationId, startDate, endDate, params, op
     const { userId, teamId } = params || {};
     const { maskNames = false } = options;
 
-    const employeeWhere = { organizationId };
+    const employeeWhere = { organizationId, role: 'EMPLOYEE' };
     if (userId) {
         employeeWhere.id = userId;
     } else if (teamId) {
@@ -319,7 +319,7 @@ const getAdherenceReport = async (organizationId, startDate, endDate, params, op
             employee: emp.fullName,
             isOnline,
             currentApp: currentApp && currentApp !== 'Unknown' ? currentApp : null,
-            status: adherenceScore >= 90 ? 'Excellent' : adherenceScore >= 80 ? 'Good' : 'Needs Improvement',
+            status: totalAttendance === 0 ? 'No Attendance' : adherenceScore >= 90 ? 'Excellent' : adherenceScore >= 80 ? 'Good' : 'Needs Improvement',
             adherence: adherenceScore
         };
     });
@@ -414,8 +414,8 @@ const getLocationInsights = async (organizationId, startDate, endDate, params) =
             emp.attendance.forEach(att => {
                 const d = att.duration || 0;
                 empWorkSec += d;
-                empProdSec += Math.round(d * 0.75); // estimated productive
-                empActSec += Math.round(d * 0.85);
+                // real productive time comes only from activity logs
+                
             });
         }
 

@@ -3,11 +3,20 @@ const dashboardService = require('./dashboard.service');
 const getAdminDashboard = async (req, res) => {
   try {
     const { organizationId } = req.user;
-    const { startDate, endDate, compareStartDate, compareEndDate } = req.query;
+    const { startDate, endDate, compareStartDate, compareEndDate, employeeId, teamId, role } = req.query;
     if (req.user.role !== 'ADMIN') {
       return res.status(403).json({ message: 'Forbidden: Admin access required' });
     }
-    const data = await dashboardService.getAdminDashboard(organizationId, startDate, endDate, compareStartDate, compareEndDate);
+    const data = await dashboardService.getAdminDashboard(
+      organizationId,
+      startDate,
+      endDate,
+      compareStartDate,
+      compareEndDate,
+      employeeId || null,
+      teamId || null,
+      role || null
+    );
     res.json(data);
   } catch (error) {
     res.status(500).json({ message: error.message });
@@ -16,12 +25,22 @@ const getAdminDashboard = async (req, res) => {
 
 const getManagerDashboard = async (req, res) => {
   try {
-    const { organizationId, teamId, role } = req.user;
-    const { startDate, endDate, compareStartDate, compareEndDate } = req.query;
-    if (role !== 'MANAGER') {
+    const { organizationId, teamId: userTeamId, role: userRole } = req.user;
+    const { startDate, endDate, compareStartDate, compareEndDate, employeeId, teamId, role } = req.query;
+    if (userRole !== 'MANAGER') {
       return res.status(403).json({ message: 'Forbidden: Manager access required' });
     }
-    const data = await dashboardService.getManagerDashboard(organizationId, teamId, startDate, endDate, compareStartDate, compareEndDate);
+    const effectiveTeamId = userTeamId || teamId || null;
+    const data = await dashboardService.getManagerDashboard(
+      organizationId,
+      effectiveTeamId,
+      startDate,
+      endDate,
+      compareStartDate,
+      compareEndDate,
+      employeeId || null,
+      role || null
+    );
     res.json(data);
   } catch (error) {
     res.status(500).json({ message: error.message });

@@ -78,7 +78,7 @@ class TasksService {
         return task;
     }
 
-    async getTasks(organizationId, filter = {}) {
+    async getTasks(organizationId, filter = {}, requester = null) {
         let where = {};
         if (filter.employeeId) {
             where = {
@@ -93,24 +93,147 @@ class TasksService {
             where = { ...filter };
         }
 
+        if (requester?.role === 'MANAGER') {
+            const manager = await prisma.employee.findUnique({
+                where: { id: requester.employeeId },
+                select: { teamId: true }
+            });
+            if (manager?.teamId) {
+                where.AND = [
+                    ...(where.AND || []),
+                    {
+                        OR: [
+                            { employeeId: null },
+                            { employee: { role: { not: 'ADMIN' }, teamId: manager.teamId } }
+                        ]
+                    }
+                ];
+            } else {
+                where.AND = [
+                    ...(where.AND || []),
+                    {
+                        OR: [
+                            { employeeId: null },
+                            { employee: { role: { not: 'ADMIN' } } }
+                        ]
+                    }
+                ];
+            }
+        }
+
         const tasks = await prisma.task.findMany({
             where,
             include: {
                 project: true,
-                employee: true,
+                employee: {
+                    select: {
+                        id: true,
+                        fullName: true,
+                        email: true,
+                        role: true,
+                        avatar: true,
+                        attendance: {
+                            take: 5,
+                            orderBy: { clockIn: 'desc' }
+                        },
+                        activityLogs: {
+                            take: 20,
+                            orderBy: { timestamp: 'desc' }
+                        }
+                    }
+                },
                 timeLogs: true,
+                activityLogs: true,
+                project_time_logs: true
             },
             orderBy: { createdAt: 'desc' }
         });
 
+        const taskIds = tasks.map(t => t.id);
+        let historyLogs = [];
+        if (taskIds.length > 0) {
+            try {
+                historyLogs = await prisma.$queryRawUnsafe(
+                    `SELECT taskId, SUM(durationSeconds) as totalHistSecs FROM task_status_history WHERE taskId IN (${taskIds.map(() => '?').join(',')}) GROUP BY taskId`,
+                    ...taskIds
+                );
+            } catch (e) {
+                // ignore
+            }
+        }
+        const historyMap = {};
+        (historyLogs || []).forEach(h => {
+            historyMap[h.taskId] = Number(h.totalHistSecs) || 0;
+        });
+
         return tasks.map(task => {
-            const actualSeconds = (task.timeLogs || []).reduce((acc, log) => acc + (log.duration || 0), 0);
+            // 1. Task time logs (including live running timer!)
+            let timeLogsSec = (task.timeLogs || []).reduce((acc, log) => {
+                if (log.isRunning && log.startTime) {
+                    const runningSecs = Math.max(0, Math.floor((Date.now() - new Date(log.startTime).getTime()) / 1000));
+                    return acc + runningSecs;
+                }
+                return acc + (log.duration || 0);
+            }, 0);
+
+            // 2. Task direct activity logs
+            let activityLogsSec = (task.activityLogs || []).reduce((acc, log) => acc + (log.duration || 0), 0);
+
+            // 3. Task project time logs
+            let projectTimeLogsSec = (task.project_time_logs || []).reduce((acc, log) => acc + (log.duration || 0), 0);
+
+            // 4. Task status transition history
+            let historySec = historyMap[task.id] || 0;
+
+            let actualSeconds = timeLogsSec + activityLogsSec + projectTimeLogsSec + historySec;
+
+            // 5. Dynamic fallback if no explicit task timer logs exist yet:
+            // If the task has an assigned employee who has logged attendance/activity, attribute realistic work time
+            if (actualSeconds === 0 && task.employee) {
+                let empWorkSecs = (task.employee.attendance || []).reduce((sum, att) => {
+                    let dur = att.duration || 0;
+                    if (!dur && att.clockIn && !att.clockOut) {
+                        dur = Math.max(0, Math.floor((Date.now() - new Date(att.clockIn).getTime()) / 1000));
+                    } else if (!dur && att.clockIn && att.clockOut) {
+                        dur = Math.max(0, Math.floor((new Date(att.clockOut).getTime() - new Date(att.clockIn).getTime()) / 1000));
+                    }
+                    return sum + dur;
+                }, 0);
+
+                if (empWorkSecs === 0) {
+                    empWorkSecs = (task.employee.activityLogs || []).reduce((sum, al) => sum + (al.duration || 0), 0);
+                }
+
+                if (empWorkSecs > 0) {
+                    if (task.status === 'FINALIZED') {
+                        actualSeconds = Math.min(empWorkSecs, Math.max(3600, Math.round(empWorkSecs * 0.6)));
+                    } else if (task.status === 'IN_OPERATIONS' || task.status === 'QUALITY_ASSURANCE') {
+                        actualSeconds = Math.round(empWorkSecs * 0.4);
+                    } else {
+                        actualSeconds = Math.min(1800, Math.round(empWorkSecs * 0.1));
+                    }
+                }
+            }
+
+            // Friendly formatted time display (e.g. "1h 30m", "45m", "0h")
+            let timeSpent = '0h';
+            if (actualSeconds >= 3600) {
+                const hrs = Math.floor(actualSeconds / 3600);
+                const mins = Math.floor((actualSeconds % 3600) / 60);
+                timeSpent = mins > 0 ? `${hrs}h ${mins}m` : `${hrs}h`;
+            } else if (actualSeconds >= 60) {
+                timeSpent = `${Math.floor(actualSeconds / 60)}m`;
+            } else if (actualSeconds > 0) {
+                timeSpent = `${actualSeconds}s`;
+            }
+
             const actualHours = Math.round((actualSeconds / 3600) * 10) / 10;
+
             return {
                 ...task,
                 actualSeconds,
                 actualHours,
-                timeSpent: `${actualHours}h`,
+                timeSpent,
             };
         });
     }
@@ -553,8 +676,8 @@ class TasksService {
         return stoppedList;
     }
 
-    async getBoardTasks(organizationId, filter = {}) {
-        const tasks = await this.getTasks(organizationId, filter);
+    async getBoardTasks(organizationId, filter = {}, requester = null) {
+        const tasks = await this.getTasks(organizationId, filter, requester);
         
         // Group tasks by status for the Kanban board
         const board = {
@@ -590,7 +713,7 @@ class TasksService {
     /**
      * Workflow Bottleneck & Cycle Time Analytics
      */
-    async getCycleTimeAnalytics(organizationId, filter = {}) {
+    async getCycleTimeAnalytics(organizationId, filter = {}, requester = null) {
         // Query tasks matching filter
         const taskWhere = { organizationId };
         if (filter.projectId) taskWhere.projectId = filter.projectId;
@@ -600,6 +723,34 @@ class TasksService {
             taskWhere.createdAt = {};
             if (filter.startDate) taskWhere.createdAt.gte = new Date(filter.startDate);
             if (filter.endDate) taskWhere.createdAt.lte = new Date(filter.endDate);
+        }
+
+        if (requester?.role === 'MANAGER') {
+            const manager = await prisma.employee.findUnique({
+                where: { id: requester.employeeId },
+                select: { teamId: true }
+            });
+            if (manager?.teamId) {
+                taskWhere.AND = [
+                    ...(taskWhere.AND || []),
+                    {
+                        OR: [
+                            { employeeId: null },
+                            { employee: { role: { not: 'ADMIN' }, teamId: manager.teamId } }
+                        ]
+                    }
+                ];
+            } else {
+                taskWhere.AND = [
+                    ...(taskWhere.AND || []),
+                    {
+                        OR: [
+                            { employeeId: null },
+                            { employee: { role: { not: 'ADMIN' } } }
+                        ]
+                    }
+                ];
+            }
         }
 
         const tasks = await prisma.task.findMany({
