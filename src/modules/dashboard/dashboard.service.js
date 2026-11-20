@@ -64,7 +64,12 @@ async function calculateMetrics(organizationId, employeeId = null, teamId = null
     // manualTime is typically productive or neutral. We'll count it towards productive
     productiveTime += manualTime;
 
-    // Incorporate persistent attendance sessions
+    // Incorporate persistent attendance sessions (auto-close any sessions stale for > 15m)
+    try {
+        const { processAllStaleSessions } = require('../../utils/attendanceSession');
+        await processAllStaleSessions();
+    } catch (sErr) {}
+
     const attWhere = {
         organizationId,
         OR: [

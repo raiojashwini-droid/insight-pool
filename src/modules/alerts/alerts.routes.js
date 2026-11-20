@@ -5,8 +5,11 @@ const authMiddleware = require('../../middlewares/auth.middleware');
 
 router.use(authMiddleware);
 
-// Alert History & Dismissal
+// Alert History & Dismissal / Deletion
 router.get('/history', alertsController.getAlertHistory);
+router.delete('/history/delete-all', alertsController.deleteAllAlerts);
+router.delete('/history/:id', alertsController.deleteAlert);
+router.delete('/history', alertsController.deleteAllAlerts);
 router.patch('/dismiss-all', alertsController.dismissAllAlerts);
 router.patch('/:id/dismiss', alertsController.dismissAlert);
 

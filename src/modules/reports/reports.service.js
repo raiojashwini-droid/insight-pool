@@ -339,30 +339,29 @@ const getWorkTypeByCategory = async (organizationId, startDate, endDate, params 
         c.comparison.barWidthPct = maxCategorySeconds > 0 ? Math.max(4, Math.round((c.comparison.totalSeconds / maxCategorySeconds) * 100)) : 0;
     });
 
-    // Format final structure with array compatibility
-    const responseArray = categoriesArray;
-    responseArray.categories = categoriesArray;
-    responseArray.summary = {
-        totalHours: Math.round((grandTotalSeconds / 3600) * 10) / 10,
-        totalSeconds: grandTotalSeconds,
-        formattedTotal: formatHM(grandTotalSeconds),
-        productivityScore: grandTotalSeconds > 0 ? Math.round((grandProductiveSeconds / grandTotalSeconds) * 100) : 0,
-        trackedAppsCount: uniqueApps.size || 1
-    };
-    responseArray.dateRanges = {
-        current: {
-            start: start.toISOString().split('T')[0],
-            end: end.toISOString().split('T')[0],
-            formatted: `${formatPrettyDate(start)} - ${formatPrettyDate(end)}`
+    // Return standard object structure with categories array, summary, and dateRanges
+    return {
+        categories: categoriesArray,
+        summary: {
+            totalHours: Math.round((grandTotalSeconds / 3600) * 10) / 10,
+            totalSeconds: grandTotalSeconds,
+            formattedTotal: formatHM(grandTotalSeconds),
+            productivityScore: grandTotalSeconds > 0 ? Math.round((grandProductiveSeconds / grandTotalSeconds) * 100) : 0,
+            trackedAppsCount: uniqueApps.size || 1
         },
-        comparison: {
-            start: compStart.toISOString().split('T')[0],
-            end: compEnd.toISOString().split('T')[0],
-            formatted: `${formatPrettyDate(compStart)} - ${formatPrettyDate(compEnd)}`
+        dateRanges: {
+            current: {
+                start: start.toISOString().split('T')[0],
+                end: end.toISOString().split('T')[0],
+                formatted: `${formatPrettyDate(start)} - ${formatPrettyDate(end)}`
+            },
+            comparison: {
+                start: compStart.toISOString().split('T')[0],
+                end: compEnd.toISOString().split('T')[0],
+                formatted: `${formatPrettyDate(compStart)} - ${formatPrettyDate(compEnd)}`
+            }
         }
     };
-
-    return responseArray;
 };
 
 /**

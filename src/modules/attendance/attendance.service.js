@@ -142,17 +142,18 @@ const attendanceService = {
             io.to(`org_${organizationId}`).emit('employee:status', { employeeId, status: 'ACTIVE' });
         }
 
-        // Persist notification for attendance event
+        // Persist notification for attendance event (scoped to employeeId)
         try {
             const empUser = await prisma.employee.findUnique({ where: { id: employeeId }, include: { user: true } });
-            const empName = empUser?.user?.name || `Employee ${empUser?.employeeCode || employeeId}`;
+            const empName = empUser?.user?.name || empUser?.fullName || `Employee ${employeeId}`;
             await prisma.notification.create({
                 data: {
                     organizationId,
                     title: 'Work session started',
                     description: `${empName} clocked in`,
                     type: 'success',
-                    targetUserId: empUser?.userId || null,
+                    targetUserId: employeeId,
+                    metadata: JSON.stringify({ employeeId, userId: empUser?.user?.id, event: 'clock-in' }),
                     unread: true
                 }
             });
@@ -175,8 +176,8 @@ const attendanceService = {
         return { ...attendance, openBreak: null, totalBreakSeconds: 0 };
     },
 
-    clockOut: async (employeeId) => {
-        const now = new Date();
+    clockOut: async (employeeId, customClockOutTime = null) => {
+        const now = customClockOutTime ? new Date(customClockOutTime) : new Date();
 
         // Find the most recent active session regardless of date
         const attendance = await prisma.attendance.findFirst({
@@ -274,17 +275,18 @@ const attendanceService = {
             io.to(`org_${attendance.organizationId}`).emit('employee:status', { employeeId, status: 'OFFLINE' });
         }
 
-        // Persist notification for clock-out
+        // Persist notification for clock-out (scoped to employeeId)
         try {
             const empUser = await prisma.employee.findUnique({ where: { id: employeeId }, include: { user: true } });
-            const empName = empUser?.user?.name || `Employee ${empUser?.employeeCode || employeeId}`;
+            const empName = empUser?.user?.name || empUser?.fullName || `Employee ${employeeId}`;
             await prisma.notification.create({
                 data: {
                     organizationId: attendance.organizationId,
                     title: 'Work session ended',
                     description: `${empName} clocked out`,
                     type: 'info',
-                    targetUserId: empUser?.userId || null,
+                    targetUserId: employeeId,
+                    metadata: JSON.stringify({ employeeId, userId: empUser?.user?.id, event: 'clock-out' }),
                     unread: true
                 }
             });
@@ -679,17 +681,18 @@ const attendanceService = {
                 io.to(`org_${organizationId}`).emit('employee:status', { employeeId, status: 'BREAK' });
             }
 
-            // Persist notification for start break
+            // Persist notification for start break (scoped to employeeId)
             try {
                 const empUser = await prisma.employee.findUnique({ where: { id: employeeId }, include: { user: true } });
-                const empName = empUser?.user?.name || `Employee ${empUser?.employeeCode || employeeId}`;
+                const empName = empUser?.user?.name || empUser?.fullName || `Employee ${employeeId}`;
                 await prisma.notification.create({
                     data: {
                         organizationId,
                         title: 'Break started',
                         description: `${empName} started a break`,
                         type: 'warning',
-                        targetUserId: empUser?.userId || null,
+                        targetUserId: employeeId,
+                        metadata: JSON.stringify({ employeeId, userId: empUser?.user?.id, event: 'break-start' }),
                         unread: true
                     }
                 });
@@ -783,16 +786,18 @@ const attendanceService = {
                 io.to(`org_${employee.organizationId}`).emit('employee:status', { employeeId, status: 'ACTIVE' });
             }
 
-            // Persist notification for end break
+            // Persist notification for end break (scoped to employeeId)
             try {
-                const empName = employee?.user?.name || `Employee ${employee?.employeeCode || employeeId}`;
+                const empUser = await prisma.employee.findUnique({ where: { id: employeeId }, include: { user: true } });
+                const empName = empUser?.user?.name || empUser?.fullName || `Employee ${employeeId}`;
                 await prisma.notification.create({
                     data: {
                         organizationId: employee.organizationId,
                         title: 'Break ended',
                         description: `${empName} resumed work`,
                         type: 'success',
-                        targetUserId: employee?.userId || null,
+                        targetUserId: employeeId,
+                        metadata: JSON.stringify({ employeeId, userId: empUser?.user?.id, event: 'break-end' }),
                         unread: true
                     }
                 });

@@ -131,13 +131,13 @@ async function seedCategoryUsageLogs() {
         }
     ];
 
-    // Seed logs for the past 14 days (including today, yesterday, and past 2 weeks)
+    // Seed logs for the past 45 days (covers Today, Yesterday, This Week, Last 7 Days, Last 30 Days, This Month, and full comparison ranges)
     const now = new Date();
     let recordsCreated = 0;
 
     for (const conf of categoryConfigs) {
-        // Distribute across days 0 to 13
-        for (let dayOffset = 0; dayOffset < 14; dayOffset++) {
+        // Distribute across days 0 to 44
+        for (let dayOffset = 0; dayOffset < 45; dayOffset++) {
             const logDate = new Date(now.getTime() - dayOffset * 86400000);
             
             // Choose app
@@ -147,8 +147,8 @@ async function seedCategoryUsageLogs() {
             const isOffice = dayOffset % 2 === 0;
             const emp = isOffice ? defaultOfficeEmp : defaultRemoteEmp;
 
-            // Duration in seconds (e.g. 15 to 45 minutes per log)
-            const duration = Math.round((conf.baseHours * 3600 / 14) * (0.8 + (dayOffset % 5) * 0.1));
+            // Duration in seconds (varied per day and category)
+            const duration = Math.round((conf.baseHours * 3600 / 14) * (0.75 + (dayOffset % 6) * 0.1));
 
             await prisma.appUsageLog.create({
                 data: {

@@ -1,15 +1,24 @@
 const prisma = require('../config/db');
 const attendanceService = require('../modules/attendance/attendance.service');
 
-/** No agent signal for this long → auto clock-out */
-const STALE_MS = 10 * 60 * 1000;
+/** 15 minutes of inactivity / offline / freeze → auto clock-out */
+const STALE_MS = 15 * 60 * 1000;
 
 async function touchAgentLastSeen(employeeId) {
     if (!employeeId) return;
-    await prisma.agent.updateMany({
-        where: { employeeId },
-        data: { lastSeen: new Date(), status: 'active' },
-    });
+    const now = new Date();
+    try {
+        await prisma.agent.updateMany({
+            where: { employeeId },
+            data: { lastSeen: now, status: 'active' },
+        });
+        await prisma.employee.update({
+            where: { id: employeeId },
+            data: { lastActiveAt: now }
+        });
+    } catch (e) {
+        // Safe ignore
+    }
 }
 
 /**
@@ -39,84 +48,171 @@ async function onAgentPulse(employeeId, organizationId) {
 }
 
 /**
- * Clock out if agent has been silent for 10+ minutes.
+ * Auto Clock-Out if employee has been offline, frozen, or inactive for 15+ minutes.
  */
-async function processStaleAttendanceForEmployee(employeeId) {
+async function processStaleAttendanceForEmployee(employeeId, openAttendance = null) {
     if (!employeeId) return false;
 
-    const agent = await prisma.agent.findFirst({
-        where: { employeeId },
-        select: { lastSeen: true, status: true },
-    });
-
-    if (!agent || agent.status !== 'active') return false;
-
-    const lastSeenMs = agent.lastSeen ? new Date(agent.lastSeen).getTime() : 0;
-    if (Date.now() - lastSeenMs < STALE_MS) return false;
-
-    // Agent has been silent for > STALE_MS, mark agent status offline so it won't be picked up again
-    await prisma.agent.updateMany({
-        where: { employeeId },
-        data: { status: 'offline' },
-    });
-
-    const open = await prisma.attendance.findFirst({
+    // 1. Find the open attendance record
+    const open = openAttendance || await prisma.attendance.findFirst({
         where: { employeeId, clockOut: null },
+        orderBy: { clockIn: 'desc' }
     });
     if (!open) return false;
 
-    // Guard 1: If employee is on BREAK, do NOT auto clock-out
+    // 2. Fetch employee details
     const emp = await prisma.employee.findUnique({
         where: { id: employeeId },
-        select: { status: true }
+        select: { id: true, status: true, organizationId: true, fullName: true, lastActiveAt: true }
     });
-    if (emp?.status === 'BREAK') {
+    if (!emp || emp.status === 'DEACTIVATED') return false;
+
+    // 3. Check active socket live sessions
+    let liveSession = null;
+    let liveSessionsMap = null;
+    let ioInstance = null;
+    try {
+        const socketServer = require('../socket/server');
+        if (socketServer.getLiveSessions) {
+            liveSessionsMap = socketServer.getLiveSessions();
+            liveSession = liveSessionsMap.get(employeeId);
+        }
+        if (socketServer.getIO) {
+            ioInstance = socketServer.getIO();
+        }
+    } catch (sErr) {}
+
+    const now = Date.now();
+
+    // If socket is actively communicating within the last 15 minutes and working, not stale
+    if (liveSession && (liveSession.status === 'ONLINE' || liveSession.status === 'ACTIVE')) {
+        const lastActivityMs = liveSession.lastActivity ? new Date(liveSession.lastActivity).getTime() : 0;
+        if (now - lastActivityMs < STALE_MS) {
+            return false;
+        }
+    }
+
+    // 4. Gather all recent activity timestamps across all channels
+    const agent = await prisma.agent.findFirst({
+        where: { employeeId },
+        select: { lastSeen: true, status: true }
+    });
+
+    const latestLiveActivity = await prisma.liveActivity.findFirst({
+        where: { employeeId },
+        orderBy: { createdAt: 'desc' },
+        select: { createdAt: true }
+    });
+
+    const latestActivityLog = await prisma.activityLog.findFirst({
+        where: { employeeId },
+        orderBy: { timestamp: 'desc' },
+        select: { timestamp: true }
+    });
+
+    const candidateTimestamps = [
+        open.clockIn ? new Date(open.clockIn).getTime() : 0,
+        emp.lastActiveAt ? new Date(emp.lastActiveAt).getTime() : 0,
+        agent?.lastSeen ? new Date(agent.lastSeen).getTime() : 0,
+        latestLiveActivity?.createdAt ? new Date(latestLiveActivity.createdAt).getTime() : 0,
+        latestActivityLog?.timestamp ? new Date(latestActivityLog.timestamp).getTime() : 0,
+        liveSession?.lastActivity ? new Date(liveSession.lastActivity).getTime() : 0
+    ].filter(t => t > 0);
+
+    const lastActiveMs = candidateTimestamps.length > 0 ? Math.max(...candidateTimestamps) : 0;
+
+    // If activity detected within 15 minutes, do not clock out
+    if (lastActiveMs > 0 && (now - lastActiveMs) < STALE_MS) {
         return false;
     }
 
-    // Guard 2: If the open session was started recently (< STALE_MS), do NOT auto clock-out
-    const clockInMs = open.clockIn ? new Date(open.clockIn).getTime() : 0;
-    if (Date.now() - clockInMs < STALE_MS) {
-        return false;
-    }
+    // 5. Employee has been offline / inactive for >= 15 minutes! Auto clock-out.
+    console.log(`[AttendanceSession] Auto-clocking out employee ${employeeId} (${emp.fullName}) due to 15m inactivity.`);
+
+    // Cap clockOut at last active time + 15 min grace (or current time if closer)
+    const effectiveClockOut = new Date(Math.min(now, (lastActiveMs > 0 ? lastActiveMs + STALE_MS : now)));
 
     try {
+        // Stop active task timers
         try {
             const tasksService = require('../modules/tasks/tasks.service');
-            await tasksService.stopActiveTimerForEmployee(employeeId, agent.lastSeen || new Date());
+            await tasksService.stopActiveTimerForEmployee(employeeId, effectiveClockOut);
         } catch (tErr) {
-            console.error(`[AttendanceSession] Auto-stopping task timer on stale session failed for ${employeeId}:`, tErr.message);
+            console.error(`[AttendanceSession] Auto-stopping task timer failed for ${employeeId}:`, tErr.message);
         }
-        await attendanceService.clockOut(employeeId);
+
+        // Close attendance session
+        await attendanceService.clockOut(employeeId, effectiveClockOut);
+
+        // Mark agent offline in DB
+        await prisma.agent.updateMany({
+            where: { employeeId },
+            data: { status: 'offline' }
+        });
+
+        // Clean liveSessions cache
+        if (liveSessionsMap && liveSessionsMap.has(employeeId)) {
+            liveSessionsMap.delete(employeeId);
+        }
+
+        // Emit real-time WebSocket events to Admin/Manager dashboard
+        const orgId = emp.organizationId || open.organizationId;
+        if (ioInstance && orgId) {
+            ioInstance.to(`org_${orgId}`).emit('employee:status', {
+                employeeId,
+                status: 'OFFLINE'
+            });
+            ioInstance.to(`org_${orgId}`).emit('attendance:update', {
+                employeeId,
+                type: 'clock-out',
+                auto: true
+            });
+        }
+
+        // Create persistent in-app notification
+        try {
+            const empUser = await prisma.employee.findUnique({ where: { id: employeeId }, include: { user: true } });
+            await prisma.notification.create({
+                data: {
+                    organizationId: orgId,
+                    title: 'Auto Clock-Out (15m Inactivity)',
+                    description: `${emp.fullName} was automatically clocked out after 15 minutes of inactivity/offline state.`,
+                    type: 'warning',
+                    targetUserId: empUser?.userId || null,
+                    unread: true
+                }
+            });
+        } catch (nErr) {}
+
         return true;
     } catch (err) {
         if (!err.message.includes('No active clock-in')) {
-            console.error(`[AttendanceSession] Stale clock-out failed for ${employeeId}:`, err.message);
+            console.error(`[AttendanceSession] Stale auto clock-out failed for ${employeeId}:`, err.message);
         }
         return false;
     }
 }
 
 /**
- * Background sweep — all employees with stale agents.
+ * Background sweep — checks all open attendance sessions and auto clocks out inactive employees.
  */
 async function processAllStaleSessions() {
-    const staleBefore = new Date(Date.now() - STALE_MS);
+    try {
+        const openAttendances = await prisma.attendance.findMany({
+            where: { clockOut: null },
+            select: { id: true, employeeId: true, clockIn: true, organizationId: true }
+        });
 
-    const agents = await prisma.agent.findMany({
-        where: {
-            status: 'active',
-            lastSeen: { lt: staleBefore },
-        },
-        select: { employeeId: true },
-    });
-
-    let closed = 0;
-    for (const agent of agents) {
-        const did = await processStaleAttendanceForEmployee(agent.employeeId);
-        if (did) closed += 1;
+        let closed = 0;
+        for (const open of openAttendances) {
+            const did = await processStaleAttendanceForEmployee(open.employeeId, open);
+            if (did) closed += 1;
+        }
+        return closed;
+    } catch (err) {
+        console.error('[AttendanceSession] Sweep error:', err.message);
+        return 0;
     }
-    return closed;
 }
 
 module.exports = {

@@ -3,6 +3,7 @@ const { getOrganizationId } = require('../../utils/orgId');
 const prisma = require('../../config/db');
 const fs = require('fs');
 const path = require('path');
+const { uploadVideoBuffer, deleteVideoByUrl } = require('../../utils/imageStorage');
 
 const videosController = {
     // POST /api/videos — Upload a video recording from the WebTrackerAgent or Screen Recorder
@@ -52,20 +53,16 @@ const videosController = {
                 return errorResponse(res, 'video file is required', 400);
             }
 
-            // Save video file to disk
+            // Save video file to Cloudinary (or fallback to local disk)
             const ext = req.file.mimetype.includes('mp4') ? 'mp4' : 'webm';
-            const filename = `${Date.now()}-${Math.round(Math.random() * 1e9)}.${ext}`;
-            const uploadDir = path.join(__dirname, '../../../public/uploads/videos');
-
-            if (!fs.existsSync(uploadDir)) {
-                fs.mkdirSync(uploadDir, { recursive: true });
-            }
-
-            const filepath = path.join(uploadDir, filename);
-            fs.writeFileSync(filepath, req.file.buffer);
+            const uploadResult = await uploadVideoBuffer(req.file.buffer, {
+                folder: `insightful/videos/${organizationId}`,
+                fileNamePrefix: `rec_${employeeId}`,
+                ext
+            });
 
             const sizeMb = parseFloat((req.file.size / (1024 * 1024)).toFixed(2));
-            const fileUrl = `/uploads/videos/${filename}`;
+            const fileUrl = uploadResult.videoUrl;
 
             // Persist to DB
             const record = await prisma.videoRecording.create({
@@ -167,12 +164,11 @@ const videosController = {
                 return errorResponse(res, 'Forbidden', 403);
             }
 
-            // Delete file from disk
+            // Delete file from Cloudinary or disk
             try {
-                const filepath = path.join(__dirname, '../../../public', video.fileUrl);
-                if (fs.existsSync(filepath)) fs.unlinkSync(filepath);
-            } catch (fsErr) {
-                console.warn('[VideosController] Could not delete file:', fsErr.message);
+                await deleteVideoByUrl(video.fileUrl);
+            } catch (delErr) {
+                console.warn('[VideosController] Could not delete file:', delErr.message);
             }
 
             await prisma.videoRecording.delete({ where: { id } });

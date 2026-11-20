@@ -104,6 +104,26 @@ const alertsController = {
         } catch (error) {
             res.status(500).json({ message: error.message });
         }
+    },
+
+    deleteAlert: async (req, res) => {
+        try {
+            const organizationId = await getOrganizationId(req);
+            const result = await alertsService.deleteAlert(req.params.id, organizationId);
+            res.json({ success: true, count: result.count });
+        } catch (error) {
+            res.status(500).json({ message: error.message });
+        }
+    },
+
+    deleteAllAlerts: async (req, res) => {
+        try {
+            const organizationId = await getOrganizationId(req);
+            const result = await alertsService.deleteAllAlerts(organizationId);
+            res.json({ success: true, count: result.count });
+        } catch (error) {
+            res.status(500).json({ message: error.message });
+        }
     }
 };
 

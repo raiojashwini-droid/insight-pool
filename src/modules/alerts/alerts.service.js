@@ -211,7 +211,7 @@ const alertsService = {
                 }
             });
 
-            // 7. Persist Notification before emission
+            // 7. Persist Notification before emission (targetUserId assigned so role scoping works)
             const notification = await prisma.notification.create({
                 data: {
                     organizationId,
@@ -219,7 +219,8 @@ const alertsService = {
                     description: message,
                     type: 'alert',
                     link: '/alerts',
-                    metadata: { alertId: alertLog.id, employeeId, diffMinutes }
+                    targetUserId: employeeId,
+                    metadata: JSON.stringify({ alertId: alertLog.id, employeeId, diffMinutes })
                 }
             });
 
@@ -318,7 +319,7 @@ const alertsService = {
                 }
             });
 
-            // Persist Notification before emission
+            // Persist Notification before emission (targetUserId assigned so role scoping works)
             const notification = await prisma.notification.create({
                 data: {
                     organizationId,
@@ -326,7 +327,8 @@ const alertsService = {
                     description: message,
                     type: 'alert',
                     link: '/alerts',
-                    metadata: { alertId: alertLog.id, employeeId, idleMinutes }
+                    targetUserId: employeeId,
+                    metadata: JSON.stringify({ alertId: alertLog.id, employeeId, idleMinutes })
                 }
             });
 
@@ -444,7 +446,7 @@ const alertsService = {
                 }
             });
 
-            // Persist Notification before emission
+            // Persist Notification before emission (targetUserId assigned so role scoping works)
             const notification = await prisma.notification.create({
                 data: {
                     organizationId,
@@ -452,12 +454,13 @@ const alertsService = {
                     description: message,
                     type: 'alert',
                     link: '/alerts',
-                    metadata: {
+                    targetUserId: employeeId,
+                    metadata: JSON.stringify({
                         alertId: alertLog.id,
                         employeeId,
                         appName: appTarget,
                         screenshotUrl
-                    }
+                    })
                 }
             });
 
@@ -524,116 +527,6 @@ const alertsService = {
             prisma.alertLog.count({ where })
         ]);
 
-        // If organization currently has 0 alerts, dynamically evaluate existing logs & attendance
-        if (alerts.length === 0 && !severity && !ruleType) {
-            try {
-                const employees = await prisma.employee.findMany({
-                    where: { organizationId },
-                    include: { team: true },
-                    take: 5
-                });
-
-                if (employees.length > 0) {
-                    // 1. Check for late attendance
-                    const lateAttendance = await prisma.attendance.findFirst({
-                        where: { organizationId, late: true },
-                        include: { employee: { include: { team: true } } }
-                    });
-
-                    if (lateAttendance && lateAttendance.employee) {
-                        await prisma.alertLog.create({
-                            data: {
-                                organizationId,
-                                employeeId: lateAttendance.employee.id,
-                                ruleType: 'LATE_ARRIVAL',
-                                trigger: 'Late Check-In',
-                                severity: 'warning',
-                                message: `Late Clock-In: ${lateAttendance.employee.fullName} clocked in past scheduled shift start.`,
-                                createdAt: lateAttendance.clockIn || new Date()
-                            }
-                        }).catch(() => {});
-                    }
-
-                    // 2. Check for unproductive activity logs
-                    const unprodLog = await prisma.activityLog.findFirst({
-                        where: { organizationId, productivity: 'UNPRODUCTIVE' },
-                        include: { employee: { include: { team: true } } }
-                    });
-
-                    if (unprodLog && unprodLog.employee) {
-                        await prisma.alertLog.create({
-                            data: {
-                                organizationId,
-                                employeeId: unprodLog.employee.id,
-                                ruleType: 'PROHIBITED_APP',
-                                trigger: 'Productivity Policy Violation',
-                                severity: 'critical',
-                                message: `Policy Violation: ${unprodLog.employee.fullName} accessed unproductive resource "${unprodLog.appWebsite || 'Unknown'}" during core hours.`,
-                                createdAt: unprodLog.timestamp || new Date()
-                            }
-                        }).catch(() => {});
-                    }
-
-                    // 3. Check for idle activity
-                    const idleLog = await prisma.activityLog.findFirst({
-                        where: { organizationId, activityType: 'IDLE' },
-                        include: { employee: { include: { team: true } } }
-                    });
-
-                    if (idleLog && idleLog.employee) {
-                        const idleMins = Math.max(15, Math.round((idleLog.duration || 1800) / 60));
-                        await prisma.alertLog.create({
-                            data: {
-                                organizationId,
-                                employeeId: idleLog.employee.id,
-                                ruleType: 'CONTINUOUS_IDLE',
-                                trigger: 'Continuous Idle Time',
-                                severity: 'warning',
-                                message: `Continuous Idle: ${idleLog.employee.fullName} detected idle for ${idleMins} minutes.`,
-                                createdAt: idleLog.timestamp || new Date()
-                            }
-                        }).catch(() => {});
-                    }
-
-                    // 4. If still empty, create an initial system security baseline event
-                    const existingCount = await prisma.alertLog.count({ where: { organizationId } });
-                    if (existingCount === 0 && employees[0]) {
-                        await prisma.alertLog.create({
-                            data: {
-                                organizationId,
-                                employeeId: employees[0].id,
-                                ruleType: 'SYSTEM_AUDIT',
-                                trigger: 'Monitoring Active',
-                                severity: 'info',
-                                message: `Security baseline active: Activity and attendance monitoring armed for ${employees[0].fullName}.`,
-                                createdAt: new Date()
-                            }
-                        }).catch(() => {});
-                    }
-
-                    // Reload alerts after auto-evaluation
-                    alerts = await prisma.alertLog.findMany({
-                        where,
-                        include: {
-                            employee: {
-                                select: {
-                                    id: true,
-                                    fullName: true,
-                                    avatar: true,
-                                    team: { select: { id: true, name: true } }
-                                }
-                            }
-                        },
-                        orderBy: { createdAt: 'desc' },
-                        take: Number(limit) || 50
-                    });
-                    total = alerts.length;
-                }
-            } catch (evalErr) {
-                console.error('[AlertsService] Auto alert evaluation error:', evalErr.message);
-            }
-        }
-
         const mapped = alerts.map(a => {
             let uiType = 'unproductive';
             if (a.ruleType === 'LATE_ARRIVAL') uiType = 'late_login';
@@ -678,6 +571,18 @@ const alertsService = {
         return await prisma.alertLog.updateMany({
             where: { organizationId, resolved: false },
             data: { resolved: true }
+        });
+    },
+
+    deleteAlert: async (id, organizationId) => {
+        return await prisma.alertLog.deleteMany({
+            where: { id, organizationId }
+        });
+    },
+
+    deleteAllAlerts: async (organizationId) => {
+        return await prisma.alertLog.deleteMany({
+            where: { organizationId }
         });
     }
 };

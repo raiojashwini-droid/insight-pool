@@ -18,19 +18,23 @@ const registerAgent = async (employeeId, deviceId, systemInfo) => {
 
     if (!employee) throw new Error('Employee not found');
 
+    const formattedSystemInfo = typeof systemInfo === 'object' && systemInfo !== null
+        ? JSON.stringify(systemInfo)
+        : (systemInfo ? String(systemInfo) : null);
+
     // Upsert agent: update if exists (linked by employeeId), otherwise create
     return await prisma.agent.upsert({
         where: { employeeId },
         update: {
             deviceId,
-            systemInfo,
+            systemInfo: formattedSystemInfo,
             status: 'active',
             lastSeen: new Date(),
         },
         create: {
             employeeId,
             deviceId,
-            systemInfo,
+            systemInfo: formattedSystemInfo,
             status: 'active', // Auto-approve for seamless setup
             lastSeen: new Date(),
         },

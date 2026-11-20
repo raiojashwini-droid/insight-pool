@@ -49,7 +49,8 @@ const notificationsController = {
             await notificationsService.markNotificationAsRead(req.params.id, organizationId, {
                 role: req.user?.role,
                 userId: req.user?.userId || req.user?.id,
-                employeeId: req.user?.employeeId
+                employeeId: req.user?.employeeId,
+                teamId: req.user?.teamId
             });
             res.json({ success: true, message: 'Notification marked as read' });
         } catch (error) {
@@ -63,7 +64,8 @@ const notificationsController = {
             const result = await notificationsService.markAllNotificationsAsRead(organizationId, {
                 role: req.user?.role,
                 userId: req.user?.userId || req.user?.id,
-                employeeId: req.user?.employeeId
+                employeeId: req.user?.employeeId,
+                teamId: req.user?.teamId
             });
             res.json({ success: true, message: 'All notifications marked as read', count: result.count });
         } catch (error) {
@@ -77,7 +79,8 @@ const notificationsController = {
             await notificationsService.deleteNotification(req.params.id, organizationId, {
                 role: req.user?.role,
                 userId: req.user?.userId || req.user?.id,
-                employeeId: req.user?.employeeId
+                employeeId: req.user?.employeeId,
+                teamId: req.user?.teamId
             });
             res.json({ success: true, message: 'Notification deleted' });
         } catch (error) {
@@ -91,7 +94,8 @@ const notificationsController = {
             const result = await notificationsService.deleteAllNotifications(organizationId, {
                 role: req.user?.role,
                 userId: req.user?.userId || req.user?.id,
-                employeeId: req.user?.employeeId
+                employeeId: req.user?.employeeId,
+                teamId: req.user?.teamId
             });
             res.json({ success: true, message: 'All notifications deleted', count: result.count });
         } catch (error) {

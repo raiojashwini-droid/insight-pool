@@ -108,26 +108,105 @@ async function uploadImageBuffer(buffer, options = {}) {
     };
 }
 
+async function uploadVideoBuffer(buffer, options = {}) {
+    const {
+        folder = 'insightful/videos',
+        fileNamePrefix = 'recording',
+        ext = 'webm'
+    } = options;
+
+    if (isCloudinaryConfigured()) {
+        try {
+            configureCloudinary();
+            const publicId = `${fileNamePrefix}_${Date.now()}_${crypto.randomBytes(4).toString('hex')}`;
+            const result = await new Promise((resolve, reject) => {
+                const uploadStream = cloudinary.uploader.upload_stream(
+                    {
+                        folder,
+                        public_id: publicId,
+                        resource_type: 'video'
+                    },
+                    (error, res) => {
+                        if (error) return reject(error);
+                        resolve(res);
+                    }
+                );
+                Readable.from(buffer).pipe(uploadStream);
+            });
+
+            return {
+                videoUrl: result.secure_url,
+                publicId: result.public_id,
+                storage: 'cloudinary'
+            };
+        } catch (cloudErr) {
+            console.warn('[imageStorage] Cloudinary video upload failed, falling back to local disk storage:', cloudErr.message);
+        }
+    }
+
+    const uploadDir = path.join(ROOT_PUBLIC_DIR, 'uploads/videos');
+    if (!fs.existsSync(uploadDir)) {
+        fs.mkdirSync(uploadDir, { recursive: true });
+    }
+    const filename = `${fileNamePrefix}_${Date.now()}_${crypto.randomBytes(4).toString('hex')}.${ext}`;
+    const filepath = path.join(uploadDir, filename);
+    fs.writeFileSync(filepath, buffer);
+
+    return {
+        videoUrl: `/uploads/videos/${filename}`,
+        publicId: null,
+        storage: 'local'
+    };
+}
+
 async function deleteImageByUrl(imageUrl) {
     if (!imageUrl) return;
 
     if (imageUrl.startsWith('/uploads/')) {
         const filePath = path.join(ROOT_PUBLIC_DIR, imageUrl);
         if (fs.existsSync(filePath)) {
-            fs.unlinkSync(filePath);
+            try { fs.unlinkSync(filePath); } catch (e) {}
         }
         return;
     }
 
     const publicId = getCloudinaryPublicIdFromUrl(imageUrl);
     if (publicId && isCloudinaryConfigured()) {
-        configureCloudinary();
-        await cloudinary.uploader.destroy(publicId, { resource_type: 'image' });
+        try {
+            configureCloudinary();
+            await cloudinary.uploader.destroy(publicId, { resource_type: 'image' });
+        } catch (e) {
+            console.warn('[imageStorage] Cloudinary image delete failed:', e.message);
+        }
+    }
+}
+
+async function deleteVideoByUrl(videoUrl) {
+    if (!videoUrl) return;
+
+    if (videoUrl.startsWith('/uploads/')) {
+        const filePath = path.join(ROOT_PUBLIC_DIR, videoUrl);
+        if (fs.existsSync(filePath)) {
+            try { fs.unlinkSync(filePath); } catch (e) {}
+        }
+        return;
+    }
+
+    const publicId = getCloudinaryPublicIdFromUrl(videoUrl);
+    if (publicId && isCloudinaryConfigured()) {
+        try {
+            configureCloudinary();
+            await cloudinary.uploader.destroy(publicId, { resource_type: 'video' });
+        } catch (e) {
+            console.warn('[imageStorage] Cloudinary video delete failed:', e.message);
+        }
     }
 }
 
 module.exports = {
     uploadImageBuffer,
+    uploadVideoBuffer,
     deleteImageByUrl,
+    deleteVideoByUrl,
     isCloudinaryConfigured
 };
