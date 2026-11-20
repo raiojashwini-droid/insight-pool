@@ -34,7 +34,8 @@ const notificationsController = {
                 offset,
                 role: req.user?.role,
                 userId: req.user?.userId || req.user?.id,
-                employeeId: req.user?.employeeId
+                employeeId: req.user?.employeeId,
+                teamId: req.user?.teamId
             });
             res.json(data);
         } catch (error) {

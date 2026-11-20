@@ -4,7 +4,7 @@ const { getOrganizationId } = require('../../utils/orgId');
 
 const getReportData = async (req, res) => {
     try {
-        const { type, userId, teamId } = req.query;
+        const { type, userId, teamId, compareStartDate, compareEndDate } = req.query;
         const organizationId = await getOrganizationId(req);
         const parseStart = (value) => {
             const d = new Date(value);
@@ -21,7 +21,7 @@ const getReportData = async (req, res) => {
         const startDate = req.query.startDate ? parseStart(req.query.startDate) : parseStart(new Date());
         const endDate = req.query.endDate ? parseEnd(req.query.endDate) : parseEnd(new Date());
 
-        const params = { userId, teamId };
+        const params = { userId, teamId, compareStartDate, compareEndDate };
         const isAdminView = req.user?.role === 'ADMIN' || req.user?.role === 'MANAGER';
         const reportOptions = { maskNames: !isAdminView };
 

@@ -13,7 +13,7 @@ const { sendIdleAlertEmail } = require('../../utils/email.service');
 const register = async (req, res) => {
     try {
         const { employeeId, email, password, name, deviceId, systemInfo, inviteToken } = req.body;
-        
+
         let targetEmployeeId = employeeId;
         let user = null;
         let invitedEmployee = null;
@@ -57,9 +57,9 @@ const register = async (req, res) => {
 
         if (!user) {
             console.log(`User record not found for: ${email}. Checking for existing employee...`);
-            
+
             let existingEmployee = invitedEmployee || existingEmpCheck;
-            
+
             if (!existingEmployee) {
                 console.log(`Creating new employee for: ${email}`);
                 let org = await prisma.organization.findUnique({ where: { id: 'default-org-id' } });
@@ -92,7 +92,7 @@ const register = async (req, res) => {
                 },
                 include: { employee: true }
             });
-            
+
             targetEmployeeId = existingEmployee.id;
 
             await prisma.employee.update({
@@ -108,7 +108,7 @@ const register = async (req, res) => {
             if (!isPasswordValid) {
                 return errorResponse(res, 'Invalid password. Please use your portal login password.', 401);
             }
-            
+
             if (!user.employee) {
                 // If user exists but has no employee record (shouldn't happen with our schema but good to handle)
                 let existingEmployee = await prisma.employee.findUnique({ where: { email } });
@@ -131,7 +131,7 @@ const register = async (req, res) => {
                         }
                     });
                 }
-                
+
                 await prisma.user.update({
                     where: { id: user.id },
                     data: { employeeId: existingEmployee.id }
@@ -156,7 +156,7 @@ const register = async (req, res) => {
         const existingDeviceAgent = await prisma.agent.findUnique({
             where: { deviceId }
         });
-        
+
         if (existingDeviceAgent && existingDeviceAgent.employeeId !== targetEmployeeId) {
             console.log(`Removing old agent record for device: ${deviceId} (previously employee: ${existingDeviceAgent.employeeId})`);
             await prisma.agent.delete({ where: { deviceId } });
@@ -164,10 +164,10 @@ const register = async (req, res) => {
 
         // 3. Register Agent (will be 'pending' by default)
         const agent = await agentService.registerAgent(targetEmployeeId, deviceId, systemInfo);
-        
+
         // Simple token for agent security
         const agentToken = Buffer.from(`${targetEmployeeId}:${deviceId}:INSIGHTFUL`).toString('base64');
-        
+
         return successResponse(res, { agent, token: agentToken }, 'Agent registration received and pending approval');
     } catch (error) {
         console.error('Agent register error:', error);
@@ -180,7 +180,7 @@ const heartbeat = async (req, res) => {
         const { deviceId, taskId } = req.body;
         if (!deviceId) return errorResponse(res, 'Device ID is required', 400);
 
-        const agent = await prisma.agent.findUnique({ 
+        const agent = await prisma.agent.findUnique({
             where: { deviceId },
             include: { employee: true }
         });
@@ -235,7 +235,7 @@ const logActivity = async (req, res) => {
         data.taskId = validatedTaskId;
 
         // Check Agent Status
-        const agent = await prisma.agent.findUnique({ 
+        const agent = await prisma.agent.findUnique({
             where: { employeeId },
             include: { employee: true }
         });
@@ -269,7 +269,7 @@ const logActivity = async (req, res) => {
         const io = getIO();
         if (io && organizationId) {
             const room = `org_${organizationId}`;
-            
+
             // 1. Notify about new screenshot (with taskId & violation metadata)
             if (logResult?.screenshotSaved && logResult?.finalScreenshotUrl) {
                 io.to(room).emit('screenshot:new', {
@@ -334,7 +334,7 @@ const getVersion = async (req, res) => {
             const pkg = JSON.parse(fs.readFileSync(packageJsonPath, 'utf8'));
             version = pkg.version || '1.0.2';
         }
-        
+
         return successResponse(res, {
             version,
             buildNumber: '1',
@@ -358,11 +358,11 @@ const downloadAgent = async (req, res) => {
         const primaryPath = path.join(__dirname, '../../../public/agent/EMS-Tracker-latest.exe');
         const altPath = path.join(__dirname, '../../../public/agent/Insightful Agent Setup 1.0.2.exe');
         const targetPath = fs.existsSync(primaryPath) ? primaryPath : (fs.existsSync(altPath) ? altPath : null);
-        
+
         if (targetPath) {
             return res.download(targetPath, 'EMS-Tracker-latest.exe');
         }
-        
+
         // If executable not present in local container disk, redirect to GitHub global CDN
         return res.redirect(GITHUB_AGENT_DOWNLOAD_URL);
     } catch (error) {
@@ -375,11 +375,11 @@ const getStatus = async (req, res) => {
     try {
         const employeeId = req.params.employeeId || req.user.employeeId;
         const status = await agentService.getAgentStatus(employeeId);
-        
+
         if (status.status === 'missing') {
             return errorResponse(res, 'Agent record not found', 404);
         }
-        
+
         return successResponse(res, status, 'Agent status retrieved');
     } catch (error) {
         console.error('Get agent status error:', error);
@@ -402,7 +402,7 @@ const checkDevice = async (req, res) => {
     try {
         const { deviceId } = req.params;
         const agent = await agentService.findAgentByDeviceId(deviceId);
-        
+
         if (!agent) {
             return errorResponse(res, 'Device not registered', 404);
         }
@@ -432,14 +432,14 @@ const updateStatus = async (req, res) => {
         }
 
         const agent = await agentService.updateAgentStatus(id, status);
-        
+
         // If approved, notify the agent immediately via socket
         if (status === 'active') {
             const io = getIO();
             if (io) {
                 console.log(`Emitting agent:approved for employee: ${agent.employeeId}`);
                 io.to(`employee_${agent.employeeId}`).emit('agent:approved');
-                
+
                 // Also notify dashboard
                 io.to(`org_${agent.organizationId || 'default'}`).emit('employee:status', {
                     employeeId: agent.employeeId,
@@ -519,7 +519,7 @@ const handleIdleActivity = async (req, res) => {
                 if (decoded.includes('INSIGHTFUL') && decoded.includes(employeeId)) {
                     isAuthorized = true;
                 }
-            } catch (e) {}
+            } catch (e) { }
 
             // 2. Check if valid JWT (Web browser session)
             if (!isAuthorized) {
@@ -529,7 +529,7 @@ const handleIdleActivity = async (req, res) => {
                     if (jwtUser) {
                         isAuthorized = true;
                     }
-                } catch (jwtErr) {}
+                } catch (jwtErr) { }
             }
 
             // 3. Allow WEB_AGENT source

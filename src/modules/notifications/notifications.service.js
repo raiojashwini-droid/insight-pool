@@ -23,20 +23,48 @@ const notificationsService = {
         }
     },
 
-    getNotifications: async (organizationId, { unreadOnly = false, type, limit = 50, offset = 0, role = 'ADMIN', userId, employeeId } = {}) => {
-        const isManager = role === 'ADMIN' || role === 'MANAGER';
+    getNotifications: async (organizationId, { unreadOnly = false, type, limit = 50, offset = 0, role = 'ADMIN', userId, employeeId, teamId } = {}) => {
+        const currentRole = (role || 'ADMIN').toUpperCase();
         const where = {
             organizationId,
             ...(unreadOnly === 'true' || unreadOnly === true ? { unread: true } : {}),
-            ...(type && type !== 'all' ? { type } : {}),
-            ...(!isManager ? {
-                OR: [
-                    ...(userId ? [{ targetUserId: userId }] : []),
-                    ...(employeeId ? [{ targetUserId: employeeId }] : []),
-                    { targetUserId: null }
-                ]
-            } : {})
+            ...(type && type !== 'all' ? { type } : {})
         };
+
+        if (currentRole === 'EMPLOYEE') {
+            where.OR = [
+                ...(userId ? [{ targetUserId: userId }] : []),
+                ...(employeeId ? [{ targetUserId: employeeId }] : []),
+                {
+                    targetUserId: null,
+                    type: { in: ['announcement', 'broadcast', 'general'] }
+                }
+            ];
+        } else if (currentRole === 'MANAGER') {
+            let teamEmpIds = [];
+            if (teamId) {
+                try {
+                    const teamEmps = await prisma.employee.findMany({
+                        where: { organizationId, teamId },
+                        select: { id: true }
+                    });
+                    teamEmpIds = teamEmps.map(e => e.id);
+                } catch (e) {}
+            }
+            where.OR = [
+                ...(userId ? [{ targetUserId: userId }] : []),
+                ...(employeeId ? [{ targetUserId: employeeId }] : []),
+                ...(teamEmpIds.length > 0 ? [{ targetUserId: { in: teamEmpIds } }] : []),
+                {
+                    targetUserId: null,
+                    NOT: [
+                        { title: { contains: 'Compliance setting' } },
+                        { title: { contains: 'Geofence' } },
+                        { title: { contains: 'Setting updated' } }
+                    ]
+                }
+            ];
+        }
 
         const [notifications, total, unreadCount] = await Promise.all([
             prisma.notification.findMany({
@@ -74,15 +102,14 @@ const notificationsService = {
 
     markNotificationAsRead: async (id, organizationId, userContext = {}) => {
         const { role = 'ADMIN', userId, employeeId } = userContext;
-        const isManager = role === 'ADMIN' || role === 'MANAGER';
+        const currentRole = (role || 'ADMIN').toUpperCase();
         const where = {
             id,
             organizationId,
-            ...(!isManager ? {
+            ...(currentRole === 'EMPLOYEE' ? {
                 OR: [
                     ...(userId ? [{ targetUserId: userId }] : []),
-                    ...(employeeId ? [{ targetUserId: employeeId }] : []),
-                    { type: 'info', targetUserId: null }
+                    ...(employeeId ? [{ targetUserId: employeeId }] : [])
                 ]
             } : {})
         };
@@ -94,15 +121,14 @@ const notificationsService = {
 
     markAllNotificationsAsRead: async (organizationId, userContext = {}) => {
         const { role = 'ADMIN', userId, employeeId } = userContext;
-        const isManager = role === 'ADMIN' || role === 'MANAGER';
+        const currentRole = (role || 'ADMIN').toUpperCase();
         const where = {
             organizationId,
             unread: true,
-            ...(!isManager ? {
+            ...(currentRole === 'EMPLOYEE' ? {
                 OR: [
                     ...(userId ? [{ targetUserId: userId }] : []),
-                    ...(employeeId ? [{ targetUserId: employeeId }] : []),
-                    { type: 'info', targetUserId: null }
+                    ...(employeeId ? [{ targetUserId: employeeId }] : [])
                 ]
             } : {})
         };
@@ -114,15 +140,14 @@ const notificationsService = {
 
     deleteNotification: async (id, organizationId, userContext = {}) => {
         const { role = 'ADMIN', userId, employeeId } = userContext;
-        const isManager = role === 'ADMIN' || role === 'MANAGER';
+        const currentRole = (role || 'ADMIN').toUpperCase();
         const where = {
             id,
             organizationId,
-            ...(!isManager ? {
+            ...(currentRole === 'EMPLOYEE' ? {
                 OR: [
                     ...(userId ? [{ targetUserId: userId }] : []),
-                    ...(employeeId ? [{ targetUserId: employeeId }] : []),
-                    { type: 'info', targetUserId: null }
+                    ...(employeeId ? [{ targetUserId: employeeId }] : [])
                 ]
             } : {})
         };
@@ -133,14 +158,13 @@ const notificationsService = {
 
     deleteAllNotifications: async (organizationId, userContext = {}) => {
         const { role = 'ADMIN', userId, employeeId } = userContext;
-        const isManager = role === 'ADMIN' || role === 'MANAGER';
+        const currentRole = (role || 'ADMIN').toUpperCase();
         const where = {
             organizationId,
-            ...(!isManager ? {
+            ...(currentRole === 'EMPLOYEE' ? {
                 OR: [
                     ...(userId ? [{ targetUserId: userId }] : []),
-                    ...(employeeId ? [{ targetUserId: employeeId }] : []),
-                    { type: 'info', targetUserId: null }
+                    ...(employeeId ? [{ targetUserId: employeeId }] : [])
                 ]
             } : {})
         };

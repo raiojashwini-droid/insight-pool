@@ -2,6 +2,7 @@ const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 const sharp = require('sharp');
+const { Readable } = require('stream');
 const { v2: cloudinary } = require('cloudinary');
 
 const ROOT_PUBLIC_DIR = path.join(__dirname, '../../public');

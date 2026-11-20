@@ -56,6 +56,11 @@ async function main() {
         {
             name: 'rahul',
             email: 'rahul@gmail.com',
+            role: 'MANAGER',
+        },
+        {
+            name: 'Test Employee',
+            email: 'test@gmail.com',
             role: 'EMPLOYEE',
         },
     ];

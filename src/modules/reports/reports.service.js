@@ -29,37 +29,340 @@ const buildReportFilter = (organizationId, startDate, endDate, params = {}) => {
     return where;
 };
 
-const PRODUCTIVITY_BUCKETS = ['PRODUCTIVE', 'NEUTRAL', 'UNPRODUCTIVE'];
+const STANDARD_REPORT_CATEGORIES = [
+    'Development tools',
+    'Collaborative software',
+    'AI tools',
+    'PM tools',
+    'Communication',
+    'Education',
+    'Advertising tools',
+    'Social & Professional network',
+    'Adult / Illegal',
+    'Art & Entertainment',
+    'Services',
+    'News',
+];
+
+function normalizeCategoryName(rawCategory, appName = '', domain = '') {
+    const cat = (rawCategory || '').trim();
+    const lower = `${cat} ${appName} ${domain}`.toLowerCase();
+
+    if (lower.includes('development') || lower.includes('vs code') || lower.includes('cursor') || lower.includes('terminal') || lower.includes('github') || lower.includes('visualstudio') || lower.includes('code')) {
+        return 'Development tools';
+    }
+    if (lower.includes('collaborative') || lower.includes('zoom') || lower.includes('teams') || lower.includes('meet') || lower.includes('webex') || lower.includes('miro') || lower.includes('meeting')) {
+        return 'Collaborative software';
+    }
+    if (lower.includes('ai') || lower.includes('chatgpt') || lower.includes('claude') || lower.includes('antigravity') || lower.includes('gemini') || lower.includes('copilot') || lower.includes('openai')) {
+        return 'AI tools';
+    }
+    if (lower.includes('pm') || lower.includes('project management') || lower.includes('jira') || lower.includes('linear') || lower.includes('trello') || lower.includes('asana') || lower.includes('notion')) {
+        return 'PM tools';
+    }
+    if (lower.includes('communication') || lower.includes('slack') || lower.includes('gmail') || lower.includes('outlook') || lower.includes('mail') || lower.includes('discord')) {
+        return 'Communication';
+    }
+    if (lower.includes('education') || lower.includes('learning') || lower.includes('stack overflow') || lower.includes('coursera') || lower.includes('udemy') || lower.includes('docs')) {
+        return 'Education';
+    }
+    if (lower.includes('advertising') || lower.includes('ads') || lower.includes('analytics') || lower.includes('marketing')) {
+        return 'Advertising tools';
+    }
+    if (lower.includes('social') || lower.includes('linkedin') || lower.includes('twitter') || lower.includes('x.com') || lower.includes('reddit') || lower.includes('facebook') || lower.includes('instagram')) {
+        return 'Social & Professional network';
+    }
+    if (lower.includes('adult') || lower.includes('illegal') || lower.includes('gambling') || lower.includes('bet') || lower.includes('restricted')) {
+        return 'Adult / Illegal';
+    }
+    if (lower.includes('entertainment') || lower.includes('youtube') || lower.includes('spotify') || lower.includes('netflix') || lower.includes('media') || lower.includes('music') || lower.includes('video')) {
+        return 'Art & Entertainment';
+    }
+    if (lower.includes('services') || lower.includes('aws') || lower.includes('cloudflare') || lower.includes('stripe') || lower.includes('azure') || lower.includes('cloud')) {
+        return 'Services';
+    }
+    if (lower.includes('news') || lower.includes('hacker news') || lower.includes('techcrunch') || lower.includes('cnn') || lower.includes('bbc')) {
+        return 'News';
+    }
+    if (lower.includes('design') || lower.includes('figma') || lower.includes('canva') || lower.includes('adobe') || lower.includes('photoshop')) {
+        return 'Design';
+    }
+    return cat || 'Other tools';
+}
+
+function formatHM(totalSeconds) {
+    if (!totalSeconds || totalSeconds <= 0) return '00:00 h';
+    const hours = Math.floor(totalSeconds / 3600);
+    const mins = Math.floor((totalSeconds % 3600) / 60);
+    return `${String(hours).padStart(2, '0')}:${String(mins).padStart(2, '0')} h`;
+}
+
+function formatPrettyDate(d) {
+    const months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+    return `${months[d.getMonth()]} ${d.getDate()}, ${d.getFullYear()}`;
+}
 
 /**
- * Work Type — Category tab: Productive / Neutral / Unproductive hours.
+ * Work Type — Category tab: Comprehensive dynamic category usage overview
+ * matching Image 1 (Total hours, Locations Office vs Remote, Productivity Level,
+ * and Comparison periods with hover popovers).
  */
-const getWorkTypeByCategory = async (organizationId, startDate, endDate, params) => {
-    const where = buildReportFilter(organizationId, startDate, endDate, params);
+const getWorkTypeByCategory = async (organizationId, startDate, endDate, params = {}) => {
+    const start = new Date(startDate);
+    const end = new Date(endDate);
+    const durationMs = Math.max(86400000, end.getTime() - start.getTime() + 1);
 
-    let logs = await prisma.appUsageLog.groupBy({
-        by: ['productivity'],
-        _sum: { duration: true },
-        where,
+    const compEnd = params.compareEndDate ? new Date(params.compareEndDate) : new Date(start.getTime() - 1);
+    const compStart = params.compareStartDate ? new Date(params.compareStartDate) : new Date(compEnd.getTime() - durationMs + 1);
+
+    const currentWhere = buildReportFilter(organizationId, start, end, params);
+    const compWhere = buildReportFilter(organizationId, compStart, compEnd, params);
+
+    // Fetch current and comparison logs in parallel from MySQL
+    const [currentLogs, compLogs, currentActivity, compActivity] = await Promise.all([
+        prisma.appUsageLog.findMany({
+            where: currentWhere,
+            include: { employee: { select: { id: true, fullName: true, location: true, workMode: true } } }
+        }),
+        prisma.appUsageLog.findMany({
+            where: compWhere,
+            include: { employee: { select: { id: true, fullName: true, location: true, workMode: true } } }
+        }),
+        prisma.activityLog.findMany({
+            where: currentWhere,
+            include: { employee: { select: { id: true, fullName: true, location: true, workMode: true } } }
+        }),
+        prisma.activityLog.findMany({
+            where: compWhere,
+            include: { employee: { select: { id: true, fullName: true, location: true, workMode: true } } }
+        })
+    ]);
+
+    // Data accumulator per category
+    const categoryStats = {};
+    const getInitBucket = () => ({
+        totalSeconds: 0,
+        officeSeconds: 0,
+        remoteSeconds: 0,
+        productiveSeconds: 0,
+        unproductiveSeconds: 0,
+        neutralSeconds: 0
     });
 
-    // Fallback: If no AppUsageLog records exist for this period, aggregate from ActivityLog
-    if (!logs || logs.length === 0 || logs.every((l) => (l._sum.duration || 0) === 0)) {
-        logs = await prisma.activityLog.groupBy({
-            by: ['productivity'],
-            _sum: { duration: true },
-            where,
-        });
+    STANDARD_REPORT_CATEGORIES.forEach(cat => {
+        categoryStats[cat] = {
+            name: cat,
+            current: getInitBucket(),
+            comparison: getInitBucket()
+        };
+    });
+
+    const uniqueApps = new Set();
+
+    // Process logs helper
+    const processItem = (item, isComparison = false) => {
+        const catName = normalizeCategoryName(item.category || item.appWebsite, item.appName || item.appWebsite, item.domain);
+        if (!categoryStats[catName]) {
+            categoryStats[catName] = {
+                name: catName,
+                current: getInitBucket(),
+                comparison: getInitBucket()
+            };
+        }
+
+        const bucket = isComparison ? categoryStats[catName].comparison : categoryStats[catName].current;
+        const dur = Number(item.duration) || 0;
+        bucket.totalSeconds += dur;
+
+        // Track unique apps
+        if (!isComparison && (item.appName || item.appWebsite)) {
+            uniqueApps.add(item.appName || item.appWebsite);
+        }
+
+        // Location: Office vs Remote
+        const empLoc = `${item.employee?.location || ''} ${item.employee?.workMode || ''}`.toLowerCase();
+        const isOffice = empLoc.includes('office');
+        if (isOffice) {
+            bucket.officeSeconds += dur;
+        } else {
+            bucket.remoteSeconds += dur;
+        }
+
+        // Productivity
+        const prod = (item.productivity || 'NEUTRAL').toUpperCase();
+        if (prod === 'PRODUCTIVE') bucket.productiveSeconds += dur;
+        else if (prod === 'UNPRODUCTIVE') bucket.unproductiveSeconds += dur;
+        else bucket.neutralSeconds += dur;
+    };
+
+    // Aggregate Current Period
+    currentLogs.forEach(l => processItem(l, false));
+    // If app logs were minimal, aggregate active work sessions from activityLog
+    if (currentLogs.length === 0) {
+        currentActivity.forEach(a => processItem(a, false));
     }
 
-    const durationByType = Object.fromEntries(
-        logs.map((log) => [log.productivity, log._sum.duration || 0])
-    );
+    // Aggregate Comparison Period
+    compLogs.forEach(l => processItem(l, true));
+    if (compLogs.length === 0) {
+        compActivity.forEach(a => processItem(a, true));
+    }
 
-    return PRODUCTIVITY_BUCKETS.map((productivity) => ({
-        productivity,
-        duration: durationByType[productivity] || 0,
-    })).filter((row) => row.duration > 0);
+    let grandTotalSeconds = 0;
+    let grandProductiveSeconds = 0;
+    let maxCategorySeconds = 1;
+
+    // Compute metrics and percentages for each category
+    const categoriesArray = Object.values(categoryStats).map(cat => {
+        const cur = cat.current;
+        const comp = cat.comparison;
+
+        grandTotalSeconds += cur.totalSeconds;
+        grandProductiveSeconds += cur.productiveSeconds;
+        if (cur.totalSeconds > maxCategorySeconds) {
+            maxCategorySeconds = cur.totalSeconds;
+        }
+
+        // Current Location breakdown
+        const curLocTotal = cur.totalSeconds || 1;
+        const curOfficePct = Math.round((cur.officeSeconds / curLocTotal) * 100);
+        const curRemotePct = 100 - curOfficePct;
+        const curDominantLoc = curOfficePct >= curRemotePct ? 'Office' : 'Remote';
+        const curDominantLocPct = curDominantLoc === 'Office' ? curOfficePct : curRemotePct;
+
+        // Current Productivity breakdown
+        const curProdTotal = cur.totalSeconds || 1;
+        const curProdPct = Math.round((cur.productiveSeconds / curProdTotal) * 100);
+        const curUnprodPct = Math.round((cur.unproductiveSeconds / curProdTotal) * 100);
+        const curNeutPct = Math.max(0, 100 - curProdPct - curUnprodPct);
+
+        let curDominantProd = 'Productive';
+        let curDominantProdSec = cur.productiveSeconds;
+        if (cur.unproductiveSeconds > curDominantProdSec) {
+            curDominantProd = 'Unproductive';
+            curDominantProdSec = cur.unproductiveSeconds;
+        }
+        if (cur.neutralSeconds > curDominantProdSec) {
+            curDominantProd = 'Neutral';
+            curDominantProdSec = cur.neutralSeconds;
+        }
+
+        // Comparison Location breakdown
+        const compLocTotal = comp.totalSeconds || 1;
+        const compOfficePct = Math.round((comp.officeSeconds / compLocTotal) * 100);
+        const compRemotePct = 100 - compOfficePct;
+        const compDominantLoc = compOfficePct >= compRemotePct ? 'Office' : 'Remote';
+        const compDominantLocPct = compDominantLoc === 'Office' ? compOfficePct : compRemotePct;
+
+        // Comparison Productivity breakdown
+        const compProdTotal = comp.totalSeconds || 1;
+        const compProdPct = Math.round((comp.productiveSeconds / compProdTotal) * 100);
+        const compUnprodPct = Math.round((comp.unproductiveSeconds / compProdTotal) * 100);
+        const compNeutPct = Math.max(0, 100 - compProdPct - compUnprodPct);
+
+        let compDominantProd = 'Productive';
+        let compDominantProdSec = comp.productiveSeconds;
+        if (comp.unproductiveSeconds > compDominantProdSec) {
+            compDominantProd = 'Unproductive';
+            compDominantProdSec = comp.unproductiveSeconds;
+        }
+        if (comp.neutralSeconds > compDominantProdSec) {
+            compDominantProd = 'Neutral';
+            compDominantProdSec = comp.neutralSeconds;
+        }
+
+        return {
+            name: cat.name,
+            current: {
+                totalSeconds: cur.totalSeconds,
+                formattedTotal: formatHM(cur.totalSeconds),
+                locations: {
+                    officeSeconds: cur.officeSeconds,
+                    remoteSeconds: cur.remoteSeconds,
+                    formattedOffice: formatHM(cur.officeSeconds),
+                    formattedRemote: formatHM(cur.remoteSeconds),
+                    officePct: curOfficePct,
+                    remotePct: curRemotePct,
+                    dominant: curDominantLoc,
+                    dominantLabel: `${curDominantLocPct}% ${curDominantLoc}`
+                },
+                productivity: {
+                    productiveSeconds: cur.productiveSeconds,
+                    unproductiveSeconds: cur.unproductiveSeconds,
+                    neutralSeconds: cur.neutralSeconds,
+                    formattedProductive: formatHM(cur.productiveSeconds),
+                    formattedUnproductive: formatHM(cur.unproductiveSeconds),
+                    formattedNeutral: formatHM(cur.neutralSeconds),
+                    productivePct: curProdPct,
+                    unproductivePct: curUnprodPct,
+                    neutralPct: curNeutPct,
+                    dominant: curDominantProd,
+                    dominantLabel: `${formatHM(curDominantProdSec)} ${curDominantProd}`
+                }
+            },
+            comparison: {
+                totalSeconds: comp.totalSeconds,
+                formattedTotal: formatHM(comp.totalSeconds),
+                locations: {
+                    officeSeconds: comp.officeSeconds,
+                    remoteSeconds: comp.remoteSeconds,
+                    formattedOffice: formatHM(comp.officeSeconds),
+                    formattedRemote: formatHM(comp.remoteSeconds),
+                    officePct: compOfficePct,
+                    remotePct: compRemotePct,
+                    dominant: compDominantLoc,
+                    dominantLabel: `${compDominantLocPct}% ${compDominantLoc}`
+                },
+                productivity: {
+                    productiveSeconds: comp.productiveSeconds,
+                    unproductiveSeconds: comp.unproductiveSeconds,
+                    neutralSeconds: comp.neutralSeconds,
+                    formattedProductive: formatHM(comp.productiveSeconds),
+                    formattedUnproductive: formatHM(comp.unproductiveSeconds),
+                    formattedNeutral: formatHM(comp.neutralSeconds),
+                    productivePct: compProdPct,
+                    unproductivePct: compUnprodPct,
+                    neutralPct: compNeutPct,
+                    dominant: compDominantProd,
+                    dominantLabel: `${formatHM(compDominantProdSec)} ${compDominantProd}`
+                }
+            }
+        };
+    });
+
+    // Sort by Total Hours descending
+    categoriesArray.sort((a, b) => b.current.totalSeconds - a.current.totalSeconds);
+
+    // Compute relative width percentage for visual bars
+    categoriesArray.forEach(c => {
+        c.current.barWidthPct = maxCategorySeconds > 0 ? Math.max(4, Math.round((c.current.totalSeconds / maxCategorySeconds) * 100)) : 0;
+        c.comparison.barWidthPct = maxCategorySeconds > 0 ? Math.max(4, Math.round((c.comparison.totalSeconds / maxCategorySeconds) * 100)) : 0;
+    });
+
+    // Format final structure with array compatibility
+    const responseArray = categoriesArray;
+    responseArray.categories = categoriesArray;
+    responseArray.summary = {
+        totalHours: Math.round((grandTotalSeconds / 3600) * 10) / 10,
+        totalSeconds: grandTotalSeconds,
+        formattedTotal: formatHM(grandTotalSeconds),
+        productivityScore: grandTotalSeconds > 0 ? Math.round((grandProductiveSeconds / grandTotalSeconds) * 100) : 0,
+        trackedAppsCount: uniqueApps.size || 1
+    };
+    responseArray.dateRanges = {
+        current: {
+            start: start.toISOString().split('T')[0],
+            end: end.toISOString().split('T')[0],
+            formatted: `${formatPrettyDate(start)} - ${formatPrettyDate(end)}`
+        },
+        comparison: {
+            start: compStart.toISOString().split('T')[0],
+            end: compEnd.toISOString().split('T')[0],
+            formatted: `${formatPrettyDate(compStart)} - ${formatPrettyDate(compEnd)}`
+        }
+    };
+
+    return responseArray;
 };
 
 /**
